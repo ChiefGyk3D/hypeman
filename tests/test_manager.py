@@ -122,3 +122,24 @@ def test_chain_is_tried_in_order(manager):
 
 def test_fallback_property_returns_the_first_of_the_chain(manager):
     assert manager.fallback is manager.fallbacks[0]
+
+
+def test_manager_heartbeat_probes_every_provider(manager):
+    manager.primary.server_up = False
+    manager.fallbacks[0].server_up = False
+
+    assert manager.heartbeat(min_interval=0) is False
+    assert manager.primary.enabled is False
+    assert manager.fallbacks[0].enabled is False
+
+
+def test_manager_heartbeat_notices_primary_recovery(manager):
+    """Switch back to the local server as soon as it returns, not on next use."""
+    manager.primary.server_up = False
+    manager.primary.mark_unavailable()
+    manager.is_available()
+    assert manager.using_fallback is True
+
+    manager.primary.server_up = True
+    assert manager.heartbeat(min_interval=0) is True
+    assert manager.using_fallback is False

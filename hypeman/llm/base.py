@@ -75,6 +75,7 @@ class BaseLLM(ABC):
         self.reconnect_interval = int(get_config('LLM', 'reconnect_interval', default='60'))
         self.max_reconnect_attempts = int(get_config('LLM', 'max_reconnect_attempts', default='0'))
         self._last_reconnect_attempt = 0.0
+        self._last_probe = 0.0
         self._reconnect_attempt_count = 0
         self._connection_was_successful = False
         self._last_error: Optional[str] = None
@@ -188,6 +189,67 @@ class BaseLLM(ABC):
         """Re-establish the provider connection. Override in subclasses."""
         return False
 
+    def probe(self) -> bool:
+        """
+        Actively verify the provider still answers, and update state.
+
+        is_available() is deliberately optimistic: while it believes the
+        provider is up it returns True without a network round-trip, and only
+        notices an outage when a generation fails. That is cheap and right for
+        the hot path, but it means two things go stale:
+
+          * /status can report the AI as healthy while the server is down
+          * the first announcement after an outage falls back to a template
+            even if the server has already come back
+
+        A poll loop should call heartbeat() once a cycle so neither happens.
+
+        Returns:
+            True if the provider answered.
+        """
+        if not self._configured:
+            return False
+
+        try:
+            answered = self._reconnect()
+        except Exception as e:
+            self._last_error = f"{type(e).__name__}: {e}"
+            answered = False
+
+        if answered:
+            was_down = not self.enabled
+            self.enabled = True
+            self._connection_was_successful = True
+            self._reconnect_attempt_count = 0
+            self._last_error = None
+            if was_down:
+                logger.info(f"✓ {self.provider_name} is back (found by heartbeat)")
+        else:
+            if self.enabled:
+                logger.warning(f"⚠ {self.provider_name} stopped answering (found by heartbeat)")
+            self.mark_unavailable(self._last_error or 'probe failed')
+
+        return answered
+
+    def heartbeat(self, min_interval: Optional[int] = None) -> bool:
+        """
+        Rate-limited probe, safe to call every poll cycle.
+
+        Args:
+            min_interval: Seconds between probes. Defaults to reconnect_interval.
+
+        Returns:
+            Current availability.
+        """
+        interval = self.reconnect_interval if min_interval is None else min_interval
+
+        elapsed = time.time() - self._last_probe
+        if elapsed < interval:
+            return self.enabled
+
+        self._last_probe = time.time()
+        return self.probe()
+
     def mark_unavailable(self, error: Optional[str] = None) -> None:
         """
         Record that the provider just went down.
@@ -244,6 +306,9 @@ class BaseLLM(ABC):
             'configured': self._configured,
             'ever_connected': self._connection_was_successful,
             'reconnect_attempts': self._reconnect_attempt_count,
+            'last_probe_age_seconds': (
+                int(time.time() - self._last_probe) if self._last_probe else None
+            ),
             'last_error': self._last_error,
         }
 

@@ -290,3 +290,77 @@ def test_status_reports_provider_state():
     assert status['enabled'] is False
     assert status['configured'] is True
     assert status['ever_connected'] is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Active liveness probing
+#
+# is_available() is optimistic — while it believes the provider is up it
+# returns True without touching the network, and only notices an outage when a
+# generation fails. heartbeat() is the counterpart a poll loop calls so that
+# /status stays honest and the first post-outage announcement isn't needlessly
+# a template.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_is_available_is_optimistic_while_it_believes_it_is_up():
+    """Documents the design: no network round-trip on the hot path."""
+    llm = FakeLLM(server_up=True)
+    llm.authenticate()
+
+    llm.server_up = False  # server dies; nothing has told the provider yet
+
+    assert llm.is_available() is True
+    assert llm.reconnect_calls == 0
+
+
+def test_heartbeat_detects_a_silent_outage():
+    """The probe is what turns 'believed up' into 'actually up'."""
+    llm = FakeLLM(server_up=True)
+    llm.authenticate()
+
+    llm.server_up = False
+    assert llm.heartbeat(min_interval=0) is False
+    assert llm.enabled is False
+
+
+def test_heartbeat_detects_recovery_without_a_generation():
+    """Recovery is noticed on the poll loop's schedule, not the next stream."""
+    llm = FakeLLM(server_up=True)
+    llm.authenticate()
+
+    llm.server_up = False
+    llm.heartbeat(min_interval=0)
+    assert llm.enabled is False
+
+    llm.server_up = True
+    assert llm.heartbeat(min_interval=0) is True
+    assert llm.enabled is True
+
+
+def test_heartbeat_is_rate_limited():
+    """Safe to call every poll cycle without hammering the server."""
+    llm = FakeLLM(server_up=True)
+    llm.authenticate()
+    llm.reconnect_interval = 3600
+
+    for _ in range(10):
+        llm.heartbeat()
+
+    assert llm.reconnect_calls <= 1
+
+
+def test_probe_resets_the_reconnect_budget_on_success():
+    llm = FakeLLM(server_up=False)
+    llm.authenticate()
+    llm.heartbeat(min_interval=0)
+    assert llm._reconnect_attempt_count >= 0
+
+    llm.server_up = True
+    llm.probe()
+    assert llm._reconnect_attempt_count == 0
+    assert llm._last_error is None
+
+
+def test_probe_on_unconfigured_provider_is_a_no_op():
+    llm = FakeLLM(server_up=True)
+    assert llm.probe() is False

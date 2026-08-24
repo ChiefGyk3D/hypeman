@@ -207,6 +207,38 @@ class LLMManager:
         """Name of the primary provider, or None if none is configured."""
         return self.primary.provider_name if self.primary else None
 
+    def heartbeat(self, min_interval: Optional[int] = None) -> bool:
+        """
+        Rate-limited liveness probe across every provider.
+
+        Call this once per poll cycle. It keeps /status honest and means the
+        first announcement after an outage uses AI rather than a template,
+        because recovery is noticed on the daemon's own schedule instead of
+        waiting for a stream to go live.
+
+        Returns:
+            True if any provider is usable.
+        """
+        if not self.enabled:
+            return False
+
+        alive = False
+        for provider in self._all_providers():
+            if provider.heartbeat(min_interval):
+                alive = True
+
+        if self.primary is not None and self.primary.enabled and self.using_fallback:
+            logger.info(f"✓ Primary LLM ({self.primary.provider_name}) recovered")
+            self.using_fallback = False
+
+        return alive
+
+    def _all_providers(self) -> List[BaseLLM]:
+        """Primary first, then the fallback chain."""
+        providers = [self.primary] if self.primary is not None else []
+        providers.extend(self.fallbacks)
+        return providers
+
     @property
     def active(self) -> Optional[BaseLLM]:
         """The provider that would serve the next request, or None."""
