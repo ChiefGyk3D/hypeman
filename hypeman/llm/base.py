@@ -42,9 +42,18 @@ class BaseLLM(ABC):
 
     #: Errors matching these substrings mean the server is unreachable rather
     #: than the request being bad. Only these trigger a reconnect attempt.
+    #: Note that timeouts are deliberately NOT here. A slow response means the
+    #: server is up and struggling, which is worth retrying; treating it as
+    #: "unreachable" would mark a healthy provider down over one slow request.
     CONNECTION_ERROR_MARKERS = (
         'connection', 'connect', 'refused', 'unreachable',
-        'failed to establish', 'no route', 'timed out', 'timeout',
+        'failed to establish', 'no route',
+    )
+
+    #: Transient conditions worth retrying with backoff.
+    RETRYABLE_ERROR_MARKERS = (
+        '503', '429', 'overloaded', 'quota', 'timeout', 'timed out',
+        'unavailable', 'rate limit',
     )
 
     #: Errors matching these are permanent — retrying just wastes time.

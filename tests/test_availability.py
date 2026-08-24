@@ -237,12 +237,23 @@ def test_successful_reconnect_resets_the_attempt_counter():
     "Failed to establish a new connection",
     "host unreachable",
     "no route to host",
-    "read timed out",
 ])
 def test_connection_errors_are_recognised(message):
     """Transport failures must trigger recovery, not a silent give-up."""
     llm = FakeLLM()
     assert llm._is_connection_error(Exception(message)) is True
+
+
+@pytest.mark.parametrize("message", ["read timed out", "request timeout"])
+def test_timeouts_are_not_connection_failures(message):
+    """
+    A slow response means the server is up and struggling.
+
+    Classifying it as unreachable would mark a healthy provider down over one
+    slow request, and for a cloud provider like Gemini that is simply wrong.
+    """
+    llm = FakeLLM()
+    assert llm._is_connection_error(Exception(message)) is False
 
 
 @pytest.mark.parametrize("message", [
