@@ -16,11 +16,77 @@ that just uses a .env file doesn't need boto3, hvac, or dopplersdk installed.
 import json
 import logging
 import os
+import threading
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 _PLACEHOLDER_PREFIX = 'YOUR_'
+
+# Doppler hands back every secret in a project/config in one call, but the old
+# code re-fetched that whole list for EVERY credential lookup. With ~20
+# credentials across eight platforms that is 20+ API calls during startup,
+# which is slow and reliably trips Doppler's rate limit. The resulting failure
+# surfaces as "missing credentials" rather than "too many requests", which is a
+# genuinely confusing way to lose an afternoon.
+#
+# One fetch per process. Call reset_secret_cache() to force a re-read.
+_doppler_cache = None
+_doppler_cache_lock = threading.Lock()
+
+
+def reset_secret_cache() -> None:
+    """Forget cached secrets so the next lookup re-fetches them."""
+    global _doppler_cache
+    with _doppler_cache_lock:
+        _doppler_cache = None
+
+
+def _doppler_secrets() -> Dict[str, Any]:
+    """
+    Every secret in the configured Doppler project, fetched once per process.
+
+    Returns an empty dict — and caches that — when Doppler is unreachable, so a
+    rate limit or outage degrades to environment variables instead of stalling
+    startup behind repeated failing requests.
+    """
+    global _doppler_cache
+
+    if _doppler_cache is not None:
+        return _doppler_cache
+
+    with _doppler_cache_lock:
+        if _doppler_cache is not None:
+            return _doppler_cache
+
+        try:
+            from dopplersdk import DopplerSDK
+        except ImportError:
+            logger.debug("dopplersdk not installed, skipping Doppler")
+            _doppler_cache = {}
+            return _doppler_cache
+
+        try:
+            sdk = DopplerSDK()
+            sdk.set_access_token(os.getenv('DOPPLER_TOKEN'))
+            response = sdk.secrets.list(
+                project=os.getenv('DOPPLER_PROJECT'),
+                config=os.getenv('DOPPLER_CONFIG', 'prd'),
+            )
+
+            secrets = getattr(response, 'secrets', None) or {}
+            _doppler_cache = {
+                key: entry.get('computed', entry.get('raw', ''))
+                for key, entry in secrets.items()
+            }
+            logger.debug(f"Loaded {len(_doppler_cache)} secrets from Doppler")
+        except Exception as e:
+            logger.error(f"Failed to fetch Doppler secrets: {type(e).__name__}")
+            _doppler_cache = {}
+
+        return _doppler_cache
+
+
 
 
 def _usable(value: Any) -> bool:
@@ -97,82 +163,41 @@ def load_secrets_from_doppler(secret_name: str) -> Dict[str, Any]:
     """
     Load secrets from Doppler, filtered to a platform prefix.
 
-    Given secret_name='twitch', this returns every Doppler secret starting with
+    Given secret_name='twitch', returns every Doppler secret starting with
     TWITCH_, re-keyed without the prefix: TWITCH_CLIENT_ID -> 'client_id'.
 
     Args:
         secret_name: Platform prefix, e.g. 'twitch', 'youtube'.
 
     Returns:
-        Dict of prefix-stripped secrets, or an empty dict on any error.
+        Dict of prefix-stripped secrets, empty on any error.
     """
-    try:
-        from dopplersdk import DopplerSDK
-    except ImportError:
-        logger.debug("dopplersdk not installed, skipping Doppler")
+    if not os.getenv('DOPPLER_TOKEN'):
+        logger.debug("DOPPLER_TOKEN not set")
         return {}
 
-    try:
-        doppler_token = os.getenv('DOPPLER_TOKEN')
-        if not doppler_token:
-            logger.debug("DOPPLER_TOKEN not set")
-            return {}
+    prefix = f"{secret_name.upper()}_"
+    bundle = {
+        key[len(prefix):].lower(): value
+        for key, value in _doppler_secrets().items()
+        if key.upper().startswith(prefix)
+    }
 
-        sdk = DopplerSDK()
-        sdk.set_access_token(doppler_token)
+    if not bundle:
+        logger.debug(f"No Doppler secrets found with prefix {prefix}")
 
-        response = sdk.secrets.list(
-            project=os.getenv('DOPPLER_PROJECT'),
-            config=os.getenv('DOPPLER_CONFIG', 'prd'),
-        )
-
-        secrets = getattr(response, 'secrets', None)
-        if not secrets:
-            return {}
-
-        prefix = f"{secret_name.upper()}_"
-        bundle = {}
-        for full_key, entry in secrets.items():
-            if full_key.upper().startswith(prefix):
-                short_key = full_key[len(prefix):].lower()
-                bundle[short_key] = entry.get('computed', entry.get('raw', ''))
-
-        if not bundle:
-            logger.debug(f"No Doppler secrets found with prefix {prefix}")
-
-        return bundle
-    except Exception as e:
-        logger.error(f"Failed to fetch Doppler secrets: {type(e).__name__}")
-        return {}
+    return bundle
 
 
 def _doppler_direct_key(key: str) -> Optional[str]:
     """
     Fetch an unprefixed key straight out of Doppler.
 
-    Some secrets (GEMINI_API_KEY) live in Doppler without a platform prefix,
-    so the prefix-filtered bundle above misses them.
+    Some secrets (GEMINI_API_KEY) live in Doppler without a platform prefix, so
+    the prefix-filtered bundle above misses them.
     """
-    try:
-        from dopplersdk import DopplerSDK
-
-        sdk = DopplerSDK()
-        sdk.set_access_token(os.getenv('DOPPLER_TOKEN'))
-        response = sdk.secrets.list(
-            project=os.getenv('DOPPLER_PROJECT'),
-            config=os.getenv('DOPPLER_CONFIG', 'prd'),
-        )
-
-        secrets = getattr(response, 'secrets', None)
-        if secrets and key.upper() in secrets:
-            entry = secrets[key.upper()]
-            value = entry.get('computed', entry.get('raw', ''))
-            if _usable(value):
-                return value
-    except Exception as e:
-        logger.debug(f"Direct Doppler lookup failed for {key}: {type(e).__name__}")
-
-    return None
+    value = _doppler_secrets().get(key.upper())
+    return value if _usable(value) else None
 
 
 def _lookup_in_bundle(bundle: Dict[str, Any], key: str, platform: str) -> Optional[str]:

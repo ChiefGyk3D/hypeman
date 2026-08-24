@@ -179,3 +179,67 @@ def test_dedupe_disabled_by_default():
     msg = "chatty"
     for _ in range(5):
         assert f.filter(_record(msg)) is True
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Doppler fetch caching
+#
+# One API call per process, not one per credential. Without this, a daemon with
+# eight platforms fires 20+ requests at startup and trips Doppler's rate limit,
+# which then surfaces as "missing credentials".
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_doppler_is_fetched_once_for_many_lookups(monkeypatch):
+    import hypeman.config.secrets as secrets
+
+    secrets.reset_secret_cache()
+    monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
+
+    calls = {'n': 0}
+
+    def fake_fetch():
+        calls['n'] += 1
+        return {'TWITCH_CLIENT_ID': 'a', 'BLUESKY_APP_PASSWORD': 'b', 'GEMINI_API_KEY': 'c'}
+
+    monkeypatch.setattr(secrets, '_doppler_secrets', fake_fetch)
+
+    assert secrets.load_secrets_from_doppler('twitch') == {'client_id': 'a'}
+    assert secrets.load_secrets_from_doppler('bluesky') == {'app_password': 'b'}
+    assert secrets._doppler_direct_key('gemini_api_key') == 'c'
+
+    assert calls['n'] == 3, "each helper reads the cache; the cache itself fetches once"
+
+    secrets.reset_secret_cache()
+
+
+def test_doppler_failure_is_cached_as_empty(monkeypatch):
+    """A rate limit must degrade to env vars, not retry on every lookup."""
+    import hypeman.config.secrets as secrets
+
+    secrets.reset_secret_cache()
+    monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
+
+    calls = {'n': 0}
+
+    class BoomSDK:
+        def __init__(self):
+            calls['n'] += 1
+
+        def set_access_token(self, token):
+            pass
+
+        @property
+        def secrets(self):
+            raise RuntimeError("TooManyRequestsException")
+
+    import sys, types
+    fake_module = types.ModuleType('dopplersdk')
+    fake_module.DopplerSDK = BoomSDK
+    monkeypatch.setitem(sys.modules, 'dopplersdk', fake_module)
+
+    for _ in range(5):
+        assert secrets._doppler_secrets() == {}
+
+    assert calls['n'] == 1, "a failed fetch must not be retried on every lookup"
+
+    secrets.reset_secret_cache()
