@@ -25,8 +25,8 @@ import time
 
 import pytest
 
-from hypeman.llm.base import BaseLLM
-from hypeman.llm.profiles import GENERIC_PROFILE
+from hypeman_social.llm.base import BaseLLM
+from hypeman_social.llm.profiles import GENERIC_PROFILE
 
 
 class FakeLLM(BaseLLM):

@@ -6,7 +6,7 @@
 
 import pytest
 
-from hypeman.llm.manager import LLMManager
+from hypeman_social.llm.manager import LLMManager
 from tests.test_availability import FakeLLM
 
 

@@ -4,7 +4,7 @@
 
 """Social platforms: the places hypeman shouts."""
 
-from hypeman.social.base import (
+from hypeman_social.social.base import (
     EVENT_END,
     EVENT_LIVE,
     EVENT_STAR,
@@ -14,10 +14,10 @@ from hypeman.social.base import (
     is_url_for_domain,
     platform_secret,
 )
-from hypeman.social.bluesky import BlueskyPlatform
-from hypeman.social.discord import DiscordPlatform
-from hypeman.social.mastodon import MastodonPlatform
-from hypeman.social.matrix import MatrixPlatform
+from hypeman_social.social.bluesky import BlueskyPlatform
+from hypeman_social.social.discord import DiscordPlatform
+from hypeman_social.social.mastodon import MastodonPlatform
+from hypeman_social.social.matrix import MatrixPlatform
 
 #: Every platform hypeman can post to, by lowercase name.
 #:

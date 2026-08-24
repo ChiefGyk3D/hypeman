@@ -4,7 +4,7 @@
 
 """Configuration and secret helpers."""
 
-from hypeman.config.config import (
+from hypeman_social.config.config import (
     get_bool_config,
     get_config,
     get_float_config,
@@ -12,7 +12,7 @@ from hypeman.config.config import (
     get_usernames,
     load_config,
 )
-from hypeman.config.secrets import (
+from hypeman_social.config.secrets import (
     get_secret,
     load_secrets_from_aws,
     load_secrets_from_doppler,

@@ -12,8 +12,8 @@ import re
 import time
 from typing import Optional
 import requests
-from hypeman.config import get_bool_config
-from hypeman.social.base import (
+from hypeman_social.config import get_bool_config
+from hypeman_social.social.base import (
     EVENT_LIVE,
     EVENT_UPLOAD,
     SocialPlatform,

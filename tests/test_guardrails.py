@@ -13,9 +13,9 @@ tests pin that behaviour so the two daemons can't drift apart again.
 
 import pytest
 
-from hypeman.llm import guardrails
-from hypeman.llm.profiles import STREAM_PROFILE, VIDEO_PROFILE
-from hypeman.social.base import is_url_for_domain
+from hypeman_social.llm import guardrails
+from hypeman_social.llm.profiles import STREAM_PROFILE, VIDEO_PROFILE
+from hypeman_social.social.base import is_url_for_domain
 
 
 # ─────────────────────────────────────────────────────────────────────────────

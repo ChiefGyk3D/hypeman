@@ -9,8 +9,8 @@ Mastodon social platform implementation with threading support.
 import logging
 from typing import Optional
 from mastodon import Mastodon
-from hypeman.config import get_bool_config, get_config
-from hypeman.social.base import SocialPlatform, platform_secret
+from hypeman_social.config import get_bool_config, get_config
+from hypeman_social.social.base import SocialPlatform, platform_secret
 
 logger = logging.getLogger(__name__)
 

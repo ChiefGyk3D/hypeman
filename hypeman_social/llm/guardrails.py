@@ -19,7 +19,7 @@ import logging
 import re
 from typing import List, Optional, Set, Tuple
 
-from hypeman.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
 
 logger = logging.getLogger(__name__)
 
@@ -278,7 +278,7 @@ def validate_hashtags_against_username(message: str, username: str) -> str:
 # Profile-driven validators
 #
 # These behave the same everywhere; only their vocabulary changes. Pass the
-# ContentProfile for whatever you're announcing. See hypeman.llm.profiles.
+# ContentProfile for whatever you're announcing. See hypeman_social.llm.profiles.
 # ─────────────────────────────────────────────────────────────────────────────
 
 

@@ -21,9 +21,9 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
-from hypeman.config import get_bool_config, get_config
-from hypeman.llm import guardrails
-from hypeman.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.config import get_bool_config, get_config
+from hypeman_social.llm import guardrails
+from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
 
 logger = logging.getLogger(__name__)
 

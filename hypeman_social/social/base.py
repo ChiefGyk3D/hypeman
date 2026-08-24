@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
 
-from hypeman.config import get_secret
+from hypeman_social.config import get_secret
 
 logger = logging.getLogger(__name__)
 

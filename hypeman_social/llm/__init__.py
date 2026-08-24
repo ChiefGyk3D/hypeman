@@ -4,9 +4,9 @@
 
 """LLM providers, guardrails, and the failover manager."""
 
-from hypeman.llm.base import BaseLLM
-from hypeman.llm.manager import LLMManager
-from hypeman.llm.profiles import (
+from hypeman_social.llm.base import BaseLLM
+from hypeman_social.llm.manager import LLMManager
+from hypeman_social.llm.profiles import (
     GENERIC_PROFILE,
     STREAM_PROFILE,
     VIDEO_PROFILE,

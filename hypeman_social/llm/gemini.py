@@ -17,9 +17,9 @@ import threading
 import time
 from typing import Optional
 
-from hypeman.config import get_config, get_secret
-from hypeman.llm.base import BaseLLM
-from hypeman.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.config import get_config, get_secret
+from hypeman_social.llm.base import BaseLLM
+from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
 
 try:
     from google import genai

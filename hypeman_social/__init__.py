@@ -13,10 +13,10 @@ the others. Now they share this.
 
 What's in here:
 
-    hypeman.config          Config and secrets (env, .env, AWS, Vault, Doppler)
-    hypeman.llm             Ollama + Gemini, guardrails, automatic failover
-    hypeman.social          Bluesky, Mastodon, Discord, Matrix
-    hypeman.observability   Logging with rotation, health endpoints
+    hypeman_social.config          Config and secrets (env, .env, AWS, Vault, Doppler)
+    hypeman_social.llm             Ollama + Gemini, guardrails, automatic failover
+    hypeman_social.social          Bluesky, Mastodon, Discord, Matrix
+    hypeman_social.observability   Logging with rotation, health endpoints
 
 Nothing in here knows what you're announcing. That's the caller's business.
 """

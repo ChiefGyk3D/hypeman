@@ -14,7 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hypeman.llm.ollama import OllamaLLM
+from hypeman_social.llm.ollama import OllamaLLM
 
 
 @pytest.fixture

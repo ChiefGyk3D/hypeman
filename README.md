@@ -1,4 +1,4 @@
-# hypeman
+# hypeman-social
 
 A hype man's entire job is announcing you loudly to a crowd. That's what this
 library does: it's the shared core behind a family of daemons that shout about
@@ -27,14 +27,19 @@ A fix that lands in one repo should protect all of them. That's what this is for
 
 ## Install
 
+> **Name note:** the distribution is `hypeman-social` and the import is
+> `hypeman_social`. Plain `hypeman` on PyPI is an unrelated project that ships
+> its own top-level `hypeman` module, so this package deliberately avoids that
+> name — installing both would otherwise break one of them silently.
+
 ```bash
-pip install hypeman[all]
+pip install hypeman-social[all]
 ```
 
 Every network and LLM backend is an optional extra, so install only what you use:
 
 ```bash
-pip install hypeman[bluesky,mastodon,ollama]
+pip install hypeman-social[bluesky,mastodon,ollama]
 ```
 
 Extras: `bluesky`, `mastodon`, `ollama`, `gemini`, `aws`, `vault`, `doppler`, `all`, `dev`.
@@ -51,7 +56,7 @@ reconnect and reports the result. A gate that can only ever go from working to
 broken is not a health check, it's a latch.
 
 ```python
-from hypeman.llm import LLMManager, VIDEO_PROFILE
+from hypeman_social.llm import LLMManager, VIDEO_PROFILE
 
 llm = LLMManager(profile=VIDEO_PROFILE)
 llm.authenticate()
@@ -91,7 +96,7 @@ announcement claiming you're "live now". Rather than fork the guardrails, pass
 a profile:
 
 ```python
-from hypeman.llm.profiles import VIDEO_PROFILE, STREAM_PROFILE, ContentProfile
+from hypeman_social.llm.profiles import VIDEO_PROFILE, STREAM_PROFILE, ContentProfile
 ```
 
 Define your own `ContentProfile` for anything else you're announcing.
@@ -116,7 +121,7 @@ this collapses them and reports the count. Warnings and errors are never
 suppressed.
 
 ```python
-from hypeman.observability import configure_logging
+from hypeman_social.observability import configure_logging
 configure_logging()
 ```
 
@@ -140,10 +145,10 @@ something that controls who can reach it.
 ## Layout
 
 ```
-hypeman.config          config + secrets (env, .env, AWS, Vault, Doppler)
-hypeman.llm             Ollama + Gemini, guardrails, failover manager
-hypeman.social          Bluesky, Mastodon, Discord, Matrix
-hypeman.observability   logging with rotation, health endpoints
+hypeman_social.config          config + secrets (env, .env, AWS, Vault, Doppler)
+hypeman_social.llm             Ollama + Gemini, guardrails, failover manager
+hypeman_social.social          Bluesky, Mastodon, Discord, Matrix
+hypeman_social.observability   logging with rotation, health endpoints
 ```
 
 Nothing in here knows what you're announcing. That's the caller's business:

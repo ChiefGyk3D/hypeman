@@ -4,8 +4,8 @@
 
 """Logging and health reporting."""
 
-from hypeman.observability.health import HealthState, start_health_server
-from hypeman.observability.logging import (
+from hypeman_social.observability.health import HealthState, start_health_server
+from hypeman_social.observability.logging import (
     RateLimitFilter,
     configure_logging,
     running_under_systemd,

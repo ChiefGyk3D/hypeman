@@ -9,7 +9,7 @@ import os
 
 import pytest
 
-from hypeman.observability.logging import (
+from hypeman_social.observability.logging import (
     RateLimitFilter,
     configure_logging,
     running_under_systemd,
@@ -156,7 +156,7 @@ def test_warnings_and_errors_are_never_suppressed():
 
 def test_suppression_window_expiry_reports_the_count(monkeypatch):
     """When the window closes, say how much was swallowed."""
-    import hypeman.observability.logging as mod
+    import hypeman_social.observability.logging as mod
 
     clock = {'t': 1000.0}
     monkeypatch.setattr(mod.time, 'monotonic', lambda: clock['t'])
@@ -190,7 +190,7 @@ def test_dedupe_disabled_by_default():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def test_doppler_is_fetched_once_for_many_lookups(monkeypatch):
-    import hypeman.config.secrets as secrets
+    import hypeman_social.config.secrets as secrets
 
     secrets.reset_secret_cache()
     monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
@@ -214,7 +214,7 @@ def test_doppler_is_fetched_once_for_many_lookups(monkeypatch):
 
 def test_doppler_failure_is_cached_as_empty(monkeypatch):
     """A rate limit must degrade to env vars, not retry on every lookup."""
-    import hypeman.config.secrets as secrets
+    import hypeman_social.config.secrets as secrets
 
     secrets.reset_secret_cache()
     monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
@@ -255,7 +255,7 @@ def test_unset_secret_name_env_falls_back_to_platform_name(monkeypatch):
     "skip Doppler" silently broke every credential lookup for those users, and
     surfaced as "missing credentials" with the secrets sitting right there.
     """
-    import hypeman.config.secrets as secrets
+    import hypeman_social.config.secrets as secrets
 
     secrets.reset_secret_cache()
     monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
@@ -278,7 +278,7 @@ def test_unset_secret_name_env_falls_back_to_platform_name(monkeypatch):
 
 def test_explicit_secret_name_env_still_wins(monkeypatch):
     """When the env var IS set, it selects the bundle."""
-    import hypeman.config.secrets as secrets
+    import hypeman_social.config.secrets as secrets
 
     secrets.reset_secret_cache()
     monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')

@@ -11,8 +11,8 @@ import re
 from typing import Optional
 from urllib.parse import urlparse
 from atproto import Client, models, client_utils
-from hypeman.config import get_bool_config, get_config
-from hypeman.social.base import SocialPlatform, is_url_for_domain, platform_secret
+from hypeman_social.config import get_bool_config, get_config
+from hypeman_social.social.base import SocialPlatform, is_url_for_domain, platform_secret
 
 logger = logging.getLogger(__name__)
 

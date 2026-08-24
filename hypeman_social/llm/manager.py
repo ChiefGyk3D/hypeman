@@ -24,9 +24,9 @@ Set LLM_FALLBACK_PROVIDER to enable it.
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from hypeman.config import get_bool_config, get_config
-from hypeman.llm.base import BaseLLM
-from hypeman.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.config import get_bool_config, get_config
+from hypeman_social.llm.base import BaseLLM
+from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +44,11 @@ def _build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
     name = (name or '').strip().lower()
 
     if name == 'ollama':
-        from hypeman.llm.ollama import OllamaLLM
+        from hypeman_social.llm.ollama import OllamaLLM
         return OllamaLLM(profile=profile)
 
     if name == 'gemini':
-        from hypeman.llm.gemini import GeminiLLM
+        from hypeman_social.llm.gemini import GeminiLLM
         return GeminiLLM(profile=profile)
 
     if name in ('', 'none'):

@@ -32,7 +32,7 @@ import sys
 import time
 from typing import Optional
 
-from hypeman.config import get_bool_config, get_config, get_int_config
+from hypeman_social.config import get_bool_config, get_config, get_int_config
 
 DEFAULT_FORMAT = '%(asctime)s [%(levelname)s] %(name)s: %(message)s'
 JOURNALD_FORMAT = '[%(levelname)s] %(name)s: %(message)s'
