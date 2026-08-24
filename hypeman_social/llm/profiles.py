@@ -101,6 +101,35 @@ STREAM_PROFILE = ContentProfile(
 )
 
 
+# For daemons announcing starred repositories (Star-Daemon).
+#
+# The hallucination list matters more here than elsewhere: a model asked to
+# describe a repo it cannot see will happily invent a star count, a language,
+# a release version, or "trending on GitHub". Announcing "12k stars" for a
+# project with 40 is a uniquely embarrassing way to be wrong in public.
+STAR_PROFILE = ContentProfile(
+    name='star',
+    content_noun='repository',
+    generic_phrases=[
+        'check it out',
+        'awesome project',
+        'must see',
+        'great find',
+        'worth a look',
+        'go star it',
+    ],
+    hallucination_patterns=[
+        r'\d+[km]?\s+stars?',
+        r'\d+\s+forks?',
+        r'trending',
+        r'v?\d+\.\d+\.\d+',
+        r'just\s+released',
+        r'\d+\s+contributors?',
+        r'most\s+popular',
+    ],
+)
+
+
 # Neutral fallback for anything else.
 GENERIC_PROFILE = ContentProfile(
     name='generic',

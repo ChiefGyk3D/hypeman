@@ -252,3 +252,28 @@ def test_extract_from_thinking_gives_up_gracefully():
 ])
 def test_url_domain_matching(url, domain, expected):
     assert is_url_for_domain(url, domain) is expected
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Star profile (for Star-Daemon, whenever it gains an LLM)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_star_profile_catches_invented_repo_stats():
+    """A model that cannot see the repo will cheerfully invent its numbers."""
+    from hypeman_social.llm.profiles import STAR_PROFILE
+
+    for fabrication in ["This one has 12k stars already",
+                        "Currently trending on GitHub",
+                        "Just released v2.1.0"]:
+        valid, issues = guardrails.validate_message_quality(
+            fabrication, 0, "some-repo", "chiefgyk3d", STAR_PROFILE)
+        assert valid is False, fabrication
+
+
+def test_star_profile_allows_an_honest_description():
+    from hypeman_social.llm.profiles import STAR_PROFILE
+
+    valid, issues = guardrails.validate_message_quality(
+        "Starred a neat little tool for wrangling Kubernetes secrets",
+        0, "kubesec", "chiefgyk3d", STAR_PROFILE)
+    assert valid is True, issues

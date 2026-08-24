@@ -8,6 +8,7 @@ from hypeman_social.llm.base import BaseLLM
 from hypeman_social.llm.manager import LLMManager
 from hypeman_social.llm.profiles import (
     GENERIC_PROFILE,
+    STAR_PROFILE,
     STREAM_PROFILE,
     VIDEO_PROFILE,
     ContentProfile,
@@ -19,5 +20,6 @@ __all__ = [
     'ContentProfile',
     'VIDEO_PROFILE',
     'STREAM_PROFILE',
+    'STAR_PROFILE',
     'GENERIC_PROFILE',
 ]
