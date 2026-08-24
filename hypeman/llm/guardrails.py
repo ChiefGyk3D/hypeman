@@ -288,68 +288,85 @@ def score_message_quality(
     profile: ContentProfile = GENERIC_PROFILE,
 ) -> Tuple[int, List[str]]:
     """
-    Score a generated message from 10 (great) down to 0 (unpostable).
+    Score a generated message from 10 (great) down to 1 (unpostable).
 
-    Penalises the things small models do when they run out of ideas: generic
-    filler, repeated words, ignoring the source title, or just parroting the
+    Penalises what small models do when they run out of ideas: generic filler,
+    lazy length, repeated words, ignoring the source title, or parroting the
     title back with a hashtag stapled on.
 
     Args:
         message: The generated message.
-        title: The source title the message is about. May be None or empty.
-        profile: Content profile supplying the generic-phrase list and noun.
+        title: The source title. May be None or empty — an end-of-stream event
+            does not always carry one.
+        profile: Supplies the generic-phrase list and the content noun.
 
     Returns:
-        (score, issues) where score is 0-10 and issues explains the deductions.
+        (score, issues), score clamped to 1-10.
     """
     score = 10
     issues = []
     message_lower = message.lower()
 
-    # Generic filler phrases — each one makes the post more forgettable.
-    for phrase in profile.generic_phrases:
-        if phrase in message_lower:
-            score -= 2
-            issues.append(f"Generic phrase: '{phrase}'")
-
-    # Repeated words suggest the model is padding to hit a length target.
-    words = [w for w in re.findall(r'\b\w+\b', message_lower) if len(w) > 3]
-    if len(words) != len(set(words)):
+    # Filler phrases. Only penalised past a threshold — one stock phrase is
+    # human, three is a model padding for length.
+    generic_count = sum(1 for phrase in profile.generic_phrases if phrase in message_lower)
+    if generic_count > 2:
         score -= 2
-        issues.append('Too many repeated words')
+        issues.append(f"Too many generic phrases ({generic_count})")
+
+    # Length: too short reads as lazy, too long as rambling.
+    content_without_hashtags = re.sub(r'#\w+', '', message).strip()
+    word_count = len(content_without_hashtags.split())
+    if word_count < 5:
+        score -= 3
+        issues.append("Too short (feels lazy)")
+    elif word_count > 25:
+        score -= 2
+        issues.append("Too long (rambling)")
+
+    # Repeated words are a sign of poor generation.
+    words = content_without_hashtags.lower().split()
+    unique_ratio = len(set(words)) / len(words) if words else 0
+    if unique_ratio < 0.7:
+        score -= 2
+        issues.append("Too many repeated words")
 
     # A message that ignores the title entirely is generic by definition.
-    # Guard against a None/empty title — an end-of-stream event may not carry one.
     title_words = set(title.lower().split()) if title else set()
     message_words = set(message_lower.split())
-    if title_words and not (title_words & message_words):
+    if len(title_words & message_words) == 0:
         score -= 3
         issues.append(f"Doesn't reference {profile.content_noun} title/content")
 
-    # Parroting the title back adds nothing the reader couldn't already see.
-    title_clean = title.strip() if title else ''
+    # Parroting the title adds nothing the reader can't already see.
     content_before_hashtags = re.split(r'\s+#', message)[0].strip()
+    title_clean = title.strip() if title else ''
     content_no_punct = re.sub(r'[^\w\s]', '', content_before_hashtags.lower()).strip()
     title_no_punct = re.sub(r'[^\w\s]', '', title_clean.lower()).strip()
 
-    if title_no_punct and content_no_punct == title_no_punct:
+    if content_no_punct == title_no_punct:
         score -= 4
-        issues.append('Message just reposts the title verbatim')
+        issues.append(
+            "Message just reposts the title verbatim - should encourage engagement instead"
+        )
     elif (
         len(title_no_punct) > 0
         and len(content_no_punct) >= len(title_no_punct)
         and len(title_no_punct) / len(content_no_punct) > 0.7
     ):
         score -= 3
-        issues.append('Message too similar to title — should add value')
+        issues.append("Message too similar to title - should add value and encourage viewers")
 
     # Some spark of personality. Not much to ask.
-    has_personality = bool(re.search(r'[!?]', message) or count_emojis(message) > 0)
+    has_personality = bool(
+        re.search(r'[!?]', message)
+        or re.search(r'[\U0001F600-\U0001F64F]', message)
+    )
     if not has_personality:
         score -= 1
-        issues.append('Flat delivery (no punctuation or emoji)')
+        issues.append("Lacks personality (no punctuation variety or emoji)")
 
-    return max(0, score), issues
+    return max(1, min(10, score)), issues
 
 
 def validate_message_quality(
@@ -384,15 +401,17 @@ def validate_message_quality(
 
     has_forbidden, found_words = contains_forbidden_words(message)
     if has_forbidden:
-        issues.append(f"Contains hype words: {', '.join(found_words)}")
+        issues.append(f"Contains forbidden words: {', '.join(found_words)}")
 
     if re.search(r'https?://', message):
         issues.append('Message contains URL (should be added separately)')
 
-    # The important one: details the model made up that were never in the input.
+    # The important one: details the model invented that were never in the
+    # input. One is enough to reject the message, so stop at the first.
     for pattern in profile.hallucination_patterns:
         if re.search(pattern, message, re.IGNORECASE):
-            issues.append(f'Possible hallucinated detail matching /{pattern}/')
+            issues.append(f"Possible hallucination detected: '{pattern}'")
+            break
 
     return (len(issues) == 0), issues
 
@@ -417,22 +436,23 @@ def validate_platform_specific(message: str, platform: str) -> List[str]:
 
     if platform_lower == 'discord':
         if '@everyone' in message or '@here' in message:
-            issues.append('Contains @everyone or @here mention')
+            issues.append("Contains @everyone or @here mention")
         if re.search(r'@\d+>', message):
-            issues.append('Malformed Discord mention detected')
+            issues.append("Malformed Discord mention detected")
         if message.count('**') % 2 != 0 or message.count('__') % 2 != 0:
-            issues.append('Unmatched markdown formatting')
+            issues.append("Unmatched markdown formatting")
 
     elif platform_lower == 'bluesky':
         if re.search(r'https?://', message):
-            issues.append('URL found in content (should be added separately for facets)')
+            issues.append("URL found in content (should be added separately for facets)")
         # A bare @handle without a domain won't resolve on Bluesky.
         if '@' in message and not re.search(r'@[a-zA-Z0-9][a-zA-Z0-9-]*\.', message):
-            issues.append('Malformed Bluesky handle (needs .domain)')
+            issues.append("Malformed Bluesky handle (needs .domain)")
 
     elif platform_lower == 'mastodon':
-        if re.search(r'@\w+@\w+', message) and not re.search(r'@\w+@[\w.]+\.\w+', message):
-            issues.append('Malformed Mastodon handle')
+        # Mastodon renders plain text; stray HTML entities show up literally.
+        if re.search(r'&[a-z]+;', message):
+            issues.append("HTML entities detected (should be plain text)")
 
     return issues
 

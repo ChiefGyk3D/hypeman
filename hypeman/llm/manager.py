@@ -198,10 +198,39 @@ class LLMManager:
 
     def apply_guardrails(self, *args, **kwargs) -> Tuple[Optional[str], List[str]]:
         """Run guardrails using the active provider's configuration."""
-        provider = self.active or self.primary
+        provider = self._guardrail_provider()
         if provider is None:
             return None, ['No LLM provider configured']
         return provider.apply_guardrails(*args, **kwargs)
+
+    def _guardrail_provider(self) -> Optional[BaseLLM]:
+        """
+        The provider whose guardrail settings and dedup cache we use.
+
+        Deliberately falls back to the primary even when it is down: guardrail
+        configuration and the recently-posted cache stay meaningful whether or
+        not the server is currently reachable, and failing over to Gemini
+        should not reset your duplicate history.
+        """
+        return self.active or self.primary or self.fallback
+
+    # ─────────────────────────────────────────────────────────────────────
+    # Deduplication
+    #
+    # Held at the manager rather than on a provider so that failing over from
+    # Ollama to Gemini doesn't wipe the history of what you just posted.
+    # ─────────────────────────────────────────────────────────────────────
+
+    def is_duplicate_message(self, message: str) -> bool:
+        """True if this is too close to something posted recently."""
+        provider = self._guardrail_provider()
+        return provider.is_duplicate_message(message) if provider else False
+
+    def add_to_message_cache(self, message: str) -> None:
+        """Remember a message so we don't repeat ourselves."""
+        provider = self._guardrail_provider()
+        if provider is not None:
+            provider.add_to_message_cache(message)
 
     def status(self) -> Dict[str, Any]:
         """Machine-readable state of every provider, for the health endpoint."""

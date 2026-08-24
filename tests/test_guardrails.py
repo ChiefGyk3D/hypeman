@@ -27,7 +27,7 @@ def test_stream_profile_catches_stream_specific_fabrications():
         "Playing some Doom, VOD coming soon", 0, "Doom night", "chiefgyk3d", STREAM_PROFILE
     )
     assert valid is False
-    assert any('hallucinated' in i for i in issues)
+    assert any('hallucination' in i for i in issues)
 
 
 def test_video_profile_catches_video_specific_fabrications():
@@ -35,7 +35,7 @@ def test_video_profile_catches_video_specific_fabrications():
         "New breakdown of the exploit, live now", 0, "Exploit breakdown", "chiefgyk3d", VIDEO_PROFILE
     )
     assert valid is False
-    assert any('hallucinated' in i for i in issues)
+    assert any('hallucination' in i for i in issues)
 
 
 def test_profiles_do_not_cross_contaminate():
@@ -108,12 +108,38 @@ def test_empty_title_does_not_crash():
     assert 0 <= score <= 10
 
 
-def test_generic_filler_is_penalised():
-    score, issues = guardrails.score_message_quality(
-        "come hang out", "Doom night", STREAM_PROFILE
-    )
-    assert any('Generic phrase' in i for i in issues)
+def test_generic_filler_is_penalised_past_a_threshold():
+    """One stock phrase is human. Three is a model padding for length."""
+    heavy = "come hang out, let's go, join me, going live, stream time"
+    score, issues = guardrails.score_message_quality(heavy, "Doom night", STREAM_PROFILE)
+    assert any('generic phrases' in i for i in issues)
     assert score < 10
+
+
+def test_a_single_generic_phrase_is_tolerated():
+    _, issues = guardrails.score_message_quality(
+        "come hang out while I fight the firmware", "Firmware night", STREAM_PROFILE
+    )
+    assert not any('generic phrases' in i for i in issues)
+
+
+def test_short_messages_are_penalised_as_lazy():
+    score, issues = guardrails.score_message_quality("live now", "Doom night", STREAM_PROFILE)
+    assert any('Too short' in i for i in issues)
+    assert score < 10
+
+
+def test_rambling_messages_are_penalised():
+    rambling = " ".join(f"word{i}" for i in range(30))
+    _, issues = guardrails.score_message_quality(rambling, "A title", STREAM_PROFILE)
+    assert any('Too long' in i for i in issues)
+
+
+def test_score_never_drops_below_one():
+    """A floor of 1 keeps the scale meaningful; 0 would imply 'no signal'."""
+    awful = "come hang out let's go join me going live stream time"
+    score, _ = guardrails.score_message_quality(awful, awful, STREAM_PROFILE)
+    assert score >= 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
