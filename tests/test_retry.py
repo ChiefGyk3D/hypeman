@@ -179,3 +179,47 @@ def test_thinking_mode_off_uses_the_plain_budget(monkeypatch):
 
     Recorder(["ok"]).generate("prompt")
     assert seen['tokens'] == 150
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-provider configuration
+#
+# A single LLM_MODEL cannot serve a primary and a fallback at once. Pointing
+# Ollama at 'gemini-2.0-flash-lite' asks a local server for a model it has
+# never heard of, and every generation quietly degrades to a template.
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_provider_specific_key_wins_over_the_shared_one(monkeypatch):
+    monkeypatch.setenv('LLM_MODEL', 'gemini-2.0-flash-lite')
+    monkeypatch.setenv('LLM_OLLAMA_MODEL', 'gemma3:12b')
+
+    from hypeman.llm.ollama import OllamaLLM
+    assert OllamaLLM().provider_config('model') == 'gemma3:12b'
+
+
+def test_shared_key_is_still_honoured(monkeypatch):
+    monkeypatch.delenv('LLM_OLLAMA_MODEL', raising=False)
+    monkeypatch.setenv('LLM_MODEL', 'mistral:7b')
+
+    from hypeman.llm.ollama import OllamaLLM
+    assert OllamaLLM().provider_config('model') == 'mistral:7b'
+
+
+def test_each_provider_reads_its_own_key(monkeypatch):
+    """The whole point: primary and fallback name different models."""
+    monkeypatch.setenv('LLM_OLLAMA_MODEL', 'gemma3:12b')
+    monkeypatch.setenv('LLM_GEMINI_MODEL', 'gemini-2.0-flash-lite')
+
+    from hypeman.llm.gemini import GeminiLLM
+    from hypeman.llm.ollama import OllamaLLM
+
+    assert OllamaLLM().provider_config('model') == 'gemma3:12b'
+    assert GeminiLLM().provider_config('model') == 'gemini-2.0-flash-lite'
+
+
+def test_default_applies_when_nothing_is_set(monkeypatch):
+    monkeypatch.delenv('LLM_OLLAMA_MODEL', raising=False)
+    monkeypatch.delenv('LLM_MODEL', raising=False)
+
+    from hypeman.llm.ollama import OllamaLLM
+    assert OllamaLLM().provider_config('model', default='fallback-model') == 'fallback-model'

@@ -82,7 +82,7 @@ class GeminiLLM(BaseLLM):
                 logger.error("✗ Gemini enabled but no API key found")
                 return False
 
-            self.model = get_config('LLM', 'model', default='gemini-2.0-flash-lite')
+            self.model = self.provider_config('model', default='gemini-2.0-flash-lite')
             self._configured = True
 
             self.client = genai.Client(api_key=self.api_key)

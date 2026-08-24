@@ -199,6 +199,33 @@ class BaseLLM(ABC):
         if error:
             self._last_error = error
 
+    def provider_config(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """
+        Read a setting, preferring a provider-specific key over the shared one.
+
+        Looks up LLM_<PROVIDER>_<KEY> first, then falls back to LLM_<KEY>:
+
+            LLM_OLLAMA_MODEL=gemma3:12b     <- used when provider is ollama
+            LLM_GEMINI_MODEL=gemini-2.0-flash-lite
+            LLM_MODEL=...                   <- shared fallback, still honoured
+
+        This exists because a single LLM_MODEL cannot serve a primary and a
+        fallback at once: pointing Ollama at 'gemini-2.0-flash-lite' asks a
+        local server for a model it has never heard of, and every generation
+        quietly degrades to a template.
+
+        Args:
+            key: Setting name without the LLM_ prefix, e.g. 'model'.
+            default: Value when neither key is set.
+
+        Returns:
+            The configured value, or the default.
+        """
+        specific = get_config('LLM', f'{self.provider_name}_{key}')
+        if specific:
+            return specific
+        return get_config('LLM', key, default=default)
+
     def _is_connection_error(self, error: Exception) -> bool:
         """True if this exception means "server unreachable" rather than "bad request"."""
         text = str(error).lower()

@@ -65,9 +65,13 @@ class OllamaLLM(BaseLLM):
             return False
 
         try:
-            host = get_config('LLM', 'ollama_host', default='http://localhost')
-            port = get_config('LLM', 'ollama_port', default='11434')
-            self.model = get_config('LLM', 'model', default='gemma3:4b')
+            host = self.provider_config('host') or get_config(
+                'LLM', 'ollama_host', default='http://localhost')
+            port = self.provider_config('port') or get_config(
+                'LLM', 'ollama_port', default='11434')
+            # LLM_OLLAMA_MODEL wins over the shared LLM_MODEL, so a Gemini
+            # fallback and a local Ollama primary can each name their own.
+            self.model = self.provider_config('model', default='gemma3:4b')
 
             if not host.startswith('http'):
                 host = f"http://{host}"

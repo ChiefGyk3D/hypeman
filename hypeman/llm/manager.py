@@ -71,7 +71,9 @@ class LLMManager:
     def __init__(self, profile: ContentProfile = GENERIC_PROFILE):
         self.profile = profile
         self.primary: Optional[BaseLLM] = None
-        self.fallback: Optional[BaseLLM] = None
+
+        #: Fallback providers, in the order they should be tried.
+        self.fallbacks: List[BaseLLM] = []
         self.enabled = False
 
         #: Set while the fallback is covering for a downed primary.
@@ -105,25 +107,32 @@ class LLMManager:
         primary_ok = self.primary.authenticate()
 
         # Fallback is strictly opt-in — see the module docstring.
-        fallback_name = get_config('LLM', 'fallback_provider', default='')
-        if fallback_name and fallback_name.strip().lower() not in ('none', primary_name.lower()):
-            self.fallback = _build_provider(fallback_name, self.profile)
-            if self.fallback is not None:
-                if self.fallback.authenticate():
-                    logger.info(f"✓ LLM fallback ready: {self.fallback.provider_name}")
-                else:
-                    logger.warning(
-                        f"⚠ LLM fallback '{fallback_name}' configured but not currently available"
-                    )
+        #
+        # Accepts a comma-separated chain, so precedence is configuration
+        # rather than code: LLM_FALLBACK_PROVIDER=gemini,anthropic tries each
+        # in order. One name behaves exactly as before.
+        self.fallbacks = []
+        for name in self._fallback_names(primary_name):
+            provider = _build_provider(name, self.profile)
+            if provider is None:
+                continue
+            if provider.authenticate():
+                logger.info(f"✓ LLM fallback ready: {provider.provider_name}")
+            else:
+                logger.warning(
+                    f"⚠ LLM fallback '{name}' configured but not currently available"
+                )
+            self.fallbacks.append(provider)
 
         self.enabled = True
 
         if primary_ok:
             logger.info(f"✓ LLM ready (primary: {self.primary.provider_name})")
-        elif self.fallback is not None:
+        elif self.fallbacks:
+            chain = ' -> '.join(p.provider_name for p in self.fallbacks)
             logger.warning(
                 f"⚠ Primary LLM '{primary_name}' unavailable at startup — "
-                f"falling back to '{self.fallback.provider_name}', will keep retrying primary"
+                f"falling back to '{chain}', will keep retrying primary"
             )
         else:
             logger.warning(
@@ -154,16 +163,44 @@ class LLMManager:
                 self.using_fallback = False
             return True
 
-        if self.fallback is not None and self.fallback.is_available():
-            if not self.using_fallback:
-                logger.warning(
-                    f"⚠ Primary LLM unavailable, using fallback "
-                    f"({self.fallback.provider_name})"
-                )
-                self.using_fallback = True
-            return True
+        for provider in self.fallbacks:
+            if provider.is_available():
+                if not self.using_fallback:
+                    logger.warning(
+                        f"⚠ Primary LLM unavailable, using fallback "
+                        f"({provider.provider_name})"
+                    )
+                    self.using_fallback = True
+                return True
 
         return False
+
+    @staticmethod
+    def _fallback_names(primary_name: str) -> List[str]:
+        """
+        Parse LLM_FALLBACK_PROVIDER into an ordered list of provider names.
+
+        Accepts one name or a comma-separated chain. The primary is filtered
+        out so listing it twice is harmless, and duplicates are dropped while
+        preserving the order given.
+        """
+        raw = get_config('LLM', 'fallback_provider', default='') or ''
+        seen, names = set(), []
+
+        for candidate in raw.split(','):
+            name = candidate.strip().lower()
+            if not name or name == 'none' or name == primary_name.strip().lower():
+                continue
+            if name not in seen:
+                seen.add(name)
+                names.append(name)
+
+        return names
+
+    @property
+    def fallback(self) -> Optional[BaseLLM]:
+        """First configured fallback, or None. Kept for callers expecting one."""
+        return self.fallbacks[0] if self.fallbacks else None
 
     @property
     def provider(self) -> Optional[str]:
@@ -175,8 +212,9 @@ class LLMManager:
         """The provider that would serve the next request, or None."""
         if self.primary is not None and self.primary.enabled:
             return self.primary
-        if self.fallback is not None and self.fallback.enabled:
-            return self.fallback
+        for provider in self.fallbacks:
+            if provider.enabled:
+                return provider
         return None
 
     def generate(self, prompt: str, max_tokens: Optional[int] = None) -> Optional[str]:
@@ -207,8 +245,7 @@ class LLMManager:
         order = []
         if self.primary is not None:
             order.append((self.primary, False))
-        if self.fallback is not None:
-            order.append((self.fallback, True))
+        order.extend((provider, True) for provider in self.fallbacks)
         return order
 
     # ─────────────────────────────────────────────────────────────────────
@@ -293,5 +330,6 @@ class LLMManager:
             'available': self.is_available() if self.enabled else False,
             'using_fallback': self.using_fallback,
             'primary': self.primary.status() if self.primary else None,
+            'fallbacks': [provider.status() for provider in self.fallbacks],
             'fallback': self.fallback.status() if self.fallback else None,
         }
