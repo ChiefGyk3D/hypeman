@@ -262,7 +262,10 @@ def get_secret(
         # values — those arrive as plain env vars and are picked up by step 4.
         # Checking the env first here would quietly invert that priority.
         if os.getenv('DOPPLER_TOKEN'):
-            prefix = os.getenv(doppler_secret_env) if doppler_secret_env else platform.lower()
+            # If the caller named an env var but it isn't set, fall back to the
+            # conventional bundle name rather than skipping Doppler entirely.
+            prefix = (os.getenv(doppler_secret_env) if doppler_secret_env else None) \
+                or platform.lower()
             if prefix:
                 value = load_secrets_from_doppler(prefix).get(key)
                 if _usable(value):
@@ -279,7 +282,7 @@ def get_secret(
 
         # 2. AWS Secrets Manager.
         if manager == 'aws':
-            name = os.getenv(secret_name_env) if secret_name_env else platform.lower()
+            name = (os.getenv(secret_name_env) if secret_name_env else None) or platform.lower()
             if name:
                 value = _lookup_in_bundle(load_secrets_from_aws(name), key, platform)
                 if value:
@@ -288,7 +291,7 @@ def get_secret(
 
         # 3. HashiCorp Vault.
         elif manager == 'vault':
-            path = os.getenv(secret_path_env) if secret_path_env else platform.lower()
+            path = (os.getenv(secret_path_env) if secret_path_env else None) or platform.lower()
             if path:
                 value = _lookup_in_bundle(load_secrets_from_vault(path), key, platform)
                 if value:

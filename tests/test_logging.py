@@ -243,3 +243,55 @@ def test_doppler_failure_is_cached_as_empty(monkeypatch):
     assert calls['n'] == 1, "a failed fetch must not be retried on every lookup"
 
     secrets.reset_secret_cache()
+
+
+def test_unset_secret_name_env_falls_back_to_platform_name(monkeypatch):
+    """
+    A named-but-unset env var must not disable the backend lookup.
+
+    platform_secret() always passes SECRETS_DOPPLER_<PLATFORM>_SECRET_NAME.
+    Most deployments never set those — they just name their Doppler secrets
+    BLUESKY_APP_PASSWORD and expect it to work. Treating "env var not set" as
+    "skip Doppler" silently broke every credential lookup for those users, and
+    surfaced as "missing credentials" with the secrets sitting right there.
+    """
+    import hypeman.config.secrets as secrets
+
+    secrets.reset_secret_cache()
+    monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
+    monkeypatch.delenv('SECRETS_DOPPLER_BLUESKY_SECRET_NAME', raising=False)
+    monkeypatch.delenv('BLUESKY_APP_PASSWORD', raising=False)
+
+    monkeypatch.setattr(secrets, '_doppler_secrets',
+                        lambda: {'BLUESKY_APP_PASSWORD': 'the-real-password'})
+
+    value = secrets.get_secret(
+        'Bluesky', 'app_password',
+        secret_name_env='SECRETS_AWS_BLUESKY_SECRET_NAME',
+        secret_path_env='SECRETS_VAULT_BLUESKY_SECRET_PATH',
+        doppler_secret_env='SECRETS_DOPPLER_BLUESKY_SECRET_NAME',
+    )
+
+    assert value == 'the-real-password'
+    secrets.reset_secret_cache()
+
+
+def test_explicit_secret_name_env_still_wins(monkeypatch):
+    """When the env var IS set, it selects the bundle."""
+    import hypeman.config.secrets as secrets
+
+    secrets.reset_secret_cache()
+    monkeypatch.setenv('DOPPLER_TOKEN', 'fake-token')
+    monkeypatch.setenv('SECRETS_DOPPLER_BLUESKY_SECRET_NAME', 'customprefix')
+    monkeypatch.delenv('BLUESKY_APP_PASSWORD', raising=False)
+
+    monkeypatch.setattr(secrets, '_doppler_secrets',
+                        lambda: {'CUSTOMPREFIX_APP_PASSWORD': 'from-custom-bundle',
+                                 'BLUESKY_APP_PASSWORD': 'from-default-bundle'})
+
+    value = secrets.get_secret(
+        'Bluesky', 'app_password',
+        doppler_secret_env='SECRETS_DOPPLER_BLUESKY_SECRET_NAME',
+    )
+    assert value == 'from-custom-bundle'
+    secrets.reset_secret_cache()
