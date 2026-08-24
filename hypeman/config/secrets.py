@@ -230,13 +230,13 @@ def get_secret(
     """
     try:
         # 1. Doppler, auto-detected via DOPPLER_TOKEN.
+        #
+        # Note the ordering: the Doppler API is consulted BEFORE the local
+        # environment, so a production secret genuinely overrides a stale .env
+        # value. Users running under `doppler run` still get their injected
+        # values — those arrive as plain env vars and are picked up by step 4.
+        # Checking the env first here would quietly invert that priority.
         if os.getenv('DOPPLER_TOKEN'):
-            # A `doppler run` invocation injects secrets as plain env vars first.
-            injected = os.getenv(f"{platform.upper()}_{key.upper()}")
-            if _usable(injected):
-                logger.debug(f"✓ Retrieved {platform}.{key} from Doppler (injected env)")
-                return injected
-
             prefix = os.getenv(doppler_secret_env) if doppler_secret_env else platform.lower()
             if prefix:
                 value = load_secrets_from_doppler(prefix).get(key)
