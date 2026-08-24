@@ -457,46 +457,58 @@ def validate_platform_specific(message: str, platform: str) -> List[str]:
     return issues
 
 
-def extract_from_thinking(thinking_content: str, max_chars: int) -> Optional[str]:
+def extract_from_thinking(thinking: str, max_chars: int = 300) -> Optional[str]:
     """
     Salvage a usable post from a reasoning model's thinking output.
 
     Qwen3 and friends sometimes spend their whole token budget reasoning and
-    return an empty content field. The actual post is usually in there,
-    somewhere after the model finishes talking itself into it — often quoted, or
-    on the last substantive line.
+    return an empty content field. The post is usually in there, and these are
+    the shapes it tends to take, in descending order of confidence:
+
+      1. Quoted with a leading '>', where the model "shows" its answer.
+      2. After an explicit marker: "Final post:", "Here's the post:", etc.
+      3. On a line carrying hashtags and roughly post-length.
 
     Args:
-        thinking_content: The raw contents of the model's thinking field.
+        thinking: Raw contents of the model's thinking field.
         max_chars: Longest acceptable result.
 
     Returns:
-        The extracted message, or None if nothing usable was found.
+        The extracted message, or None if nothing usable was found — which
+        usually means the model ran out of tokens mid-thought.
     """
-    if not thinking_content:
+    if not thinking:
         return None
 
-    # Best case: the model quoted its final answer.
-    quoted = re.findall(r'"([^"]{20,})"', thinking_content)
+    lines = thinking.split('\n')
+
+    # 1. Quoted lines. The model is showing its work.
+    quoted = [line.strip()[1:].strip() for line in lines if line.strip().startswith('>')]
     if quoted:
-        candidate = quoted[-1].strip()
-        if len(candidate) <= max_chars:
-            return candidate
+        result = ' '.join(quoted).strip()
+        if len(result) >= 20:
+            return result
 
-    # Otherwise take the last substantive line that isn't meta-commentary.
-    meta_prefixes = (
-        'okay', 'ok,', 'so ', 'let me', 'i need', 'i should', 'first',
-        'the user', 'wait', 'hmm', 'actually', 'maybe', 'alternatively',
-        'that works', 'perfect', 'this is', "let's",
+    # 2. Explicit hand-off markers.
+    markers = (
+        'final post:', "here's the post:", 'the post:', 'my post:',
+        'announcement:', 'here it is:', 'result:', 'output:',
     )
+    lowered = thinking.lower()
+    for marker in markers:
+        if marker in lowered:
+            after = thinking[lowered.find(marker) + len(marker):].strip()
+            first_line = after.split('\n')[0].strip()
+            if first_line and len(first_line) >= 20:
+                return first_line.strip('"\'')
 
-    for line in reversed([l.strip() for l in thinking_content.splitlines() if l.strip()]):
-        if len(line) < 20 or len(line) > max_chars:
-            continue
-        if line.lower().startswith(meta_prefixes):
-            continue
-        if line.endswith(':'):
-            continue
-        return line
+    # 3. A line with hashtags, at roughly post length.
+    for line in lines:
+        stripped = line.strip()
+        if '#' in stripped and 30 <= len(stripped) <= max_chars:
+            cleaned = re.sub(r'^[-*\u2022]\s*', '', stripped).strip('"\'')
+            if cleaned:
+                return cleaned
 
+    logger.debug("Could not extract content from thinking — model may have run out of tokens")
     return None

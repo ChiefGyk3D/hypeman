@@ -31,6 +31,14 @@ from hypeman.llm.profiles import ContentProfile, GENERIC_PROFILE
 logger = logging.getLogger(__name__)
 
 
+def _normalize_for_dedup(message: str) -> str:
+    """Strip hashtags, punctuation and case so near-misses compare equal."""
+    import re
+    text = re.sub(r'#\w+', '', message)
+    text = re.sub(r'[^\w\s]', '', text)
+    return ' '.join(text.lower().split())
+
+
 def _build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
     """Instantiate a provider by name. Returns None for an unknown name."""
     name = (name or '').strip().lower()
@@ -68,6 +76,12 @@ class LLMManager:
 
         #: Set while the fallback is covering for a downed primary.
         self.using_fallback = False
+
+        # Deduplication lives here rather than on a provider — see
+        # is_duplicate_message() for why.
+        self.enable_deduplication = get_bool_config('LLM', 'enable_deduplication', default=True)
+        self.dedup_cache_size = int(get_config('LLM', 'dedup_cache_size', default='20'))
+        self._message_cache: List[str] = []
 
     def authenticate(self) -> bool:
         """
@@ -152,6 +166,11 @@ class LLMManager:
         return False
 
     @property
+    def provider(self) -> Optional[str]:
+        """Name of the primary provider, or None if none is configured."""
+        return self.primary.provider_name if self.primary else None
+
+    @property
     def active(self) -> Optional[BaseLLM]:
         """The provider that would serve the next request, or None."""
         if self.primary is not None and self.primary.enabled:
@@ -201,7 +220,17 @@ class LLMManager:
         provider = self._guardrail_provider()
         if provider is None:
             return None, ['No LLM provider configured']
-        return provider.apply_guardrails(*args, **kwargs)
+
+        message, issues = provider.apply_guardrails(*args, **kwargs)
+
+        # The provider checked its own (unused) cache; apply the manager's,
+        # which is the one that actually spans providers.
+        if message and self.is_duplicate_message(message):
+            return None, ['Duplicate of a recently posted message']
+        if message:
+            self.add_to_message_cache(message)
+
+        return message, issues
 
     def _guardrail_provider(self) -> Optional[BaseLLM]:
         """
@@ -222,15 +251,40 @@ class LLMManager:
     # ─────────────────────────────────────────────────────────────────────
 
     def is_duplicate_message(self, message: str) -> bool:
-        """True if this is too close to something posted recently."""
-        provider = self._guardrail_provider()
-        return provider.is_duplicate_message(message) if provider else False
+        """
+        True if this is too close to something posted recently.
+
+        Owned here rather than on a provider so it works before authenticate()
+        and doesn't reset when we fail over from Ollama to Gemini.
+        """
+        if not self.enable_deduplication or not self._message_cache:
+            return False
+
+        normalized = _normalize_for_dedup(message)
+
+        for cached in self._message_cache:
+            cached_norm = _normalize_for_dedup(cached)
+            if normalized == cached_norm:
+                return True
+
+            # Heavy word overlap counts as a repeat even if phrasing shifted.
+            words = set(normalized.split())
+            cached_words = set(cached_norm.split())
+            if words and cached_words:
+                overlap = len(words & cached_words) / max(len(words), len(cached_words))
+                if overlap > 0.8:
+                    return True
+
+        return False
 
     def add_to_message_cache(self, message: str) -> None:
         """Remember a message so we don't repeat ourselves."""
-        provider = self._guardrail_provider()
-        if provider is not None:
-            provider.add_to_message_cache(message)
+        if not self.enable_deduplication:
+            return
+
+        self._message_cache.append(message)
+        if len(self._message_cache) > self.dedup_cache_size:
+            self._message_cache = self._message_cache[-self.dedup_cache_size:]
 
     def status(self) -> Dict[str, Any]:
         """Machine-readable state of every provider, for the health endpoint."""

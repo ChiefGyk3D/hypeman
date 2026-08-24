@@ -188,14 +188,47 @@ def test_safe_trim_leaves_short_messages_alone():
 
 
 def test_extract_from_thinking_finds_a_quoted_answer():
-    thinking = 'Okay, let me think. I should be punchy. Maybe "Tearing into the new firmware today."'
-    assert guardrails.extract_from_thinking(thinking, 300) == "Tearing into the new firmware today."
+    """A '>' quoted line is the model showing its final answer."""
+    thinking = (
+        "Let me think about this.\n"
+        "> Tearing into the new firmware today, and it is not going quietly. #Firmware\n"
+        "That captures the tone I want."
+    )
+    result = guardrails.extract_from_thinking(thinking)
+    assert result is not None
+    assert "Tearing into the new firmware" in result
+    assert ">" not in result
 
 
-def test_extract_from_thinking_skips_meta_commentary():
-    thinking = "Okay, I need to write a post.\nLet me think about this.\nThe firmware teardown continues today."
-    result = guardrails.extract_from_thinking(thinking, 300)
-    assert result == "The firmware teardown continues today."
+def test_extract_from_thinking_finds_a_marked_answer():
+    """An explicit 'Final post:' marker is the clearest signal there is."""
+    thinking = (
+        "Steps:\n1. Keep it short\n2. Add a hashtag\n"
+        "Final post: Firmware teardown continues tonight, come watch. #Hardware"
+    )
+    result = guardrails.extract_from_thinking(thinking)
+    assert result is not None
+    assert "Firmware teardown continues tonight" in result
+
+
+def test_extract_from_thinking_finds_a_hashtag_line():
+    """Failing the clearer signals, a post-length line with hashtags will do."""
+    thinking = (
+        "I need something catchy...\nThe user wants:\n- short\n"
+        "- Firmware teardown night, come join me on stream. #Hardware #Linux\n"
+        "That should work."
+    )
+    result = guardrails.extract_from_thinking(thinking)
+    assert result is not None
+    assert "#Hardware" in result
+    # Leading list markers are stripped.
+    assert not result.startswith('-')
+
+
+def test_extract_from_thinking_respects_max_chars():
+    """A wall of text is not a social post, however many hashtags it has."""
+    long_line = "word " * 200 + "#Tag"
+    assert guardrails.extract_from_thinking(long_line, max_chars=300) is None
 
 
 def test_extract_from_thinking_gives_up_gracefully():
