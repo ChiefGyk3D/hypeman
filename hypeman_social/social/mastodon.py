@@ -8,9 +8,18 @@ Mastodon social platform implementation with threading support.
 
 import logging
 from typing import Optional
-from mastodon import Mastodon
+
 from hypeman_social.config import get_bool_config, get_config
 from hypeman_social.social.base import SocialPlatform, platform_secret
+
+# Mastodon.py is the 'mastodon' extra. Importing this module without it must
+# not raise — the daemon may only have the extras for the networks it uses.
+try:
+    from mastodon import Mastodon
+    MASTODON_AVAILABLE = True
+except ImportError:
+    Mastodon = None  # type: ignore[assignment]
+    MASTODON_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,13 @@ class MastodonPlatform(SocialPlatform):
     def authenticate(self):
         if not get_bool_config('Mastodon', 'enable_posting', default=False):
             return False
+
+        if not MASTODON_AVAILABLE:
+            logger.error(
+                "✗ Mastodon enabled but Mastodon.py is not installed. "
+                "Run: pip install 'hypeman-social[mastodon]'"
+            )
+            return False
             
         client_id = platform_secret('Mastodon', 'client_id')
         client_secret = platform_secret('Mastodon', 'client_secret')
@@ -34,10 +50,14 @@ class MastodonPlatform(SocialPlatform):
         
         if not all([client_id, client_secret, access_token, api_base_url]):
             missing = []
-            if not client_id: missing.append('client_id')
-            if not client_secret: missing.append('client_secret')
-            if not access_token: missing.append('access_token')
-            if not api_base_url: missing.append('api_base_url')
+            if not client_id:
+                missing.append('client_id')
+            if not client_secret:
+                missing.append('client_secret')
+            if not access_token:
+                missing.append('access_token')
+            if not api_base_url:
+                missing.append('api_base_url')
             logger.warning(f"✗ Mastodon missing credentials: {', '.join(missing)}")
             return False
             
@@ -67,9 +87,10 @@ class MastodonPlatform(SocialPlatform):
                 thumbnail_url = stream_data.get('thumbnail_url')
                 if thumbnail_url:
                     try:
-                        import requests
-                        import tempfile
                         import os
+                        import tempfile
+
+                        import requests
                         
                         # Download thumbnail
                         headers = {
@@ -99,7 +120,7 @@ class MastodonPlatform(SocialPlatform):
                                 # Build description with stream info
                                 viewer_count = stream_data.get('viewer_count', 0)
                                 game_name = stream_data.get('game_name', '')
-                                description = f"🔴 LIVE"
+                                description = "🔴 LIVE"
                                 if viewer_count:
                                     description += f" • {viewer_count:,} viewers"
                                 if game_name:

@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hypeman_social.config import get_bool_config, get_config
 from hypeman_social.llm.base import BaseLLM
-from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
 logger = logging.getLogger(__name__)
 
