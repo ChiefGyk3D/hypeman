@@ -39,7 +39,7 @@ ollama    = ["ollama>=0.3.0"]
 gemini    = ["google-genai>=0.3.0"]
 aws       = ["boto3>=1.34.0"]
 vault     = ["hvac>=2.1.0"]
-doppler   = ["dopplersdk>=1.3.0"]
+doppler   = ["doppler-sdk>=1.3.0"]
 
 # Everything a daemon typically needs: all four networks and both LLM providers.
 all = [
