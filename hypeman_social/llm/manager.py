@@ -39,8 +39,14 @@ def _normalize_for_dedup(message: str) -> str:
     return ' '.join(text.lower().split())
 
 
-def _build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
-    """Instantiate a provider by name. Returns None for an unknown name."""
+def build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
+    """
+    Instantiate a provider by name ('ollama' or 'gemini').
+
+    Public so daemons can pin a specific backend when they need to; most
+    callers want LLMManager, which adds failover on top. Returns None for an
+    unknown or empty name.
+    """
     name = (name or '').strip().lower()
 
     if name == 'ollama':
@@ -98,7 +104,7 @@ class LLMManager:
             return False
 
         primary_name = get_config('LLM', 'provider', default='gemini')
-        self.primary = _build_provider(primary_name, self.profile)
+        self.primary = build_provider(primary_name, self.profile)
 
         if self.primary is None:
             logger.error(f"✗ Could not construct primary LLM provider '{primary_name}'")
@@ -113,7 +119,7 @@ class LLMManager:
         # in order. One name behaves exactly as before.
         self.fallbacks = []
         for name in self._fallback_names(primary_name):
-            provider = _build_provider(name, self.profile)
+            provider = build_provider(name, self.profile)
             if provider is None:
                 continue
             if provider.authenticate():

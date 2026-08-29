@@ -5,7 +5,7 @@
 """LLM providers, guardrails, and the failover manager."""
 
 from hypeman_social.llm.base import BaseLLM
-from hypeman_social.llm.manager import LLMManager
+from hypeman_social.llm.manager import LLMManager, build_provider
 from hypeman_social.llm.profiles import (
     GENERIC_PROFILE,
     STAR_PROFILE,
@@ -17,6 +17,7 @@ from hypeman_social.llm.profiles import (
 __all__ = [
     'BaseLLM',
     'LLMManager',
+    'build_provider',
     'ContentProfile',
     'VIDEO_PROFILE',
     'STREAM_PROFILE',
