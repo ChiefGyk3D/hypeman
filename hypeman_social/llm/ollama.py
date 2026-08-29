@@ -52,6 +52,11 @@ class OllamaLLM(BaseLLM):
         self.host: Optional[str] = None
         self.model: Optional[str] = None
 
+        # True when the loaded model advertises the 'thinking' capability.
+        # Detected at connect time; controls whether we pass `think` at all,
+        # so older Ollama servers that predate the parameter never see it.
+        self._supports_thinking = False
+
     def authenticate(self) -> bool:
         """
         Read config and connect to the Ollama server.
@@ -133,13 +138,46 @@ class OllamaLLM(BaseLLM):
                 )
 
             self.client = client
-            logger.debug(f"Connected to Ollama at {self.host}")
+            self._supports_thinking = self._detect_thinking_support(client)
+            logger.debug(
+                f"Connected to Ollama at {self.host} "
+                f"(thinking-capable model: {self._supports_thinking})"
+            )
             return True
 
         except Exception as e:
             self._last_error = f"{type(e).__name__}: {e}"
             logger.debug(f"Ollama connection attempt failed: {type(e).__name__}: {e}")
             return False
+
+    def _detect_thinking_support(self, client) -> bool:
+        """
+        True if the configured model advertises the 'thinking' capability.
+
+        Hybrid reasoning models (gemma4, qwen3, deepseek-r1) think by default
+        when the request doesn't say otherwise. On generate() that reasoning is
+        withheld from the response, so the model can burn the entire num_predict
+        budget "thinking" and hand back an empty string — which callers see as
+        a dead provider. Knowing the capability lets _raw_generate pass an
+        explicit `think` and stay in control of the output.
+
+        Detection failure (old server without /api/show capabilities, model not
+        yet pulled) just means False — we then never send `think`, which is the
+        pre-existing behaviour.
+        """
+        if not self.model:
+            return False
+
+        try:
+            info = client.show(self.model)
+        except Exception:
+            return False
+
+        capabilities = getattr(info, 'capabilities', None)
+        if capabilities is None and isinstance(info, dict):
+            capabilities = info.get('capabilities')
+
+        return bool(capabilities) and 'thinking' in capabilities
 
     @staticmethod
     def _model_names(response) -> list:
@@ -173,6 +211,16 @@ class OllamaLLM(BaseLLM):
         if not self.client:
             raise ConnectionError("Ollama client not connected")
 
+        # For thinking-capable models the request must say whether to reason:
+        # left unspecified they think by default, and generate() withholds the
+        # reasoning — every token goes to thoughts we never see and the content
+        # comes back empty. think=False forces a direct answer; think=True
+        # routes the reasoning into the response's thinking field, where the
+        # extraction below can reach it.
+        extra = {}
+        if self._supports_thinking:
+            extra['think'] = bool(self.enable_thinking_mode)
+
         response = self.client.generate(
             model=self.model,
             prompt=prompt,
@@ -181,6 +229,7 @@ class OllamaLLM(BaseLLM):
                 'temperature': self.temperature,
                 'top_p': self.top_p,
             },
+            **extra,
         )
 
         result, thinking = self._unpack(response)
