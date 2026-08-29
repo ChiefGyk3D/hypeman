@@ -17,7 +17,6 @@ from hypeman_social.llm import guardrails
 from hypeman_social.llm.profiles import STREAM_PROFILE, VIDEO_PROFILE
 from hypeman_social.social.base import is_url_for_domain
 
-
 # ─────────────────────────────────────────────────────────────────────────────
 # Profile-specific hallucination detection
 # ─────────────────────────────────────────────────────────────────────────────

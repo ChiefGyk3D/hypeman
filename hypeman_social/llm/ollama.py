@@ -24,7 +24,7 @@ from typing import Optional
 from hypeman_social.config import get_config
 from hypeman_social.llm import guardrails
 from hypeman_social.llm.base import BaseLLM
-from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
 try:
     import ollama

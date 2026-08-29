@@ -13,7 +13,9 @@ import logging
 import re
 from typing import Optional
 from urllib.parse import quote
+
 import requests
+
 from hypeman_social.config import get_bool_config
 from hypeman_social.social.base import SocialPlatform, is_url_for_domain, platform_secret
 
@@ -68,7 +70,7 @@ class MatrixPlatform(SocialPlatform):
             if not self.access_token:
                 logger.error("✗ Matrix login failed - check username/password")
                 return False
-            logger.info(f"✓ Matrix logged in and obtained access token")
+            logger.info("✓ Matrix logged in and obtained access token")
         else:
             # Fall back to static access token
             logger.info("Using static access token authentication")
@@ -112,7 +114,7 @@ class MatrixPlatform(SocialPlatform):
                     logger.info(f"✓ Obtained Matrix access token (expires: {data.get('expires_in_ms', 'never')})")
                     return access_token
                 else:
-                    logger.error(f"✗ Matrix login succeeded but no access_token in response")
+                    logger.error("✗ Matrix login succeeded but no access_token in response")
             else:
                 logger.error(f"✗ Matrix login failed: {response.status_code}")
             
@@ -179,7 +181,7 @@ class MatrixPlatform(SocialPlatform):
             if response.status_code == 200:
                 data = response.json()
                 event_id = data.get('event_id')
-                logger.info(f"✓ Matrix message posted")
+                logger.info("✓ Matrix message posted")
                 return event_id
             else:
                 logger.warning(f"⚠ Matrix post failed with status {response.status_code}: {response.text}")

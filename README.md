@@ -1,5 +1,10 @@
 # hypeman-social
 
+[![CI](https://github.com/ChiefGyk3D/hypeman/actions/workflows/ci.yml/badge.svg)](https://github.com/ChiefGyk3D/hypeman/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/hypeman-social)](https://pypi.org/project/hypeman-social/)
+[![Python versions](https://img.shields.io/pypi/pyversions/hypeman-social)](https://pypi.org/project/hypeman-social/)
+[![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+
 A hype man's entire job is announcing you loudly to a crowd. That's what this
 library does: it's the shared core behind a family of daemons that shout about
 your content on Bluesky, Mastodon, Discord, and Matrix.
