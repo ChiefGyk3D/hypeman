@@ -55,13 +55,13 @@ Discord and Matrix need no extra — they're plain HTTP.
 
 | Doc | What's in it |
 |---|---|
-| [Quickstart](docs/QUICKSTART.md) | Build a complete announcement daemon in ~60 lines |
-| [Configuration reference](docs/CONFIGURATION.md) | Every env var, with defaults and worked examples |
-| [API reference](docs/API.md) | The full public surface, module by module |
-| [Design notes](docs/DESIGN.md) | Why it's shaped this way — the availability contract, opt-in failover, guardrail philosophy |
-| [Publishing](docs/PUBLISHING.md) | PyPI Trusted Publishing setup and release procedure |
-| [Contributing](CONTRIBUTING.md) | Dev setup, the non-negotiable contracts, how to add platforms/providers |
-| [Changelog](CHANGELOG.md) | Release history |
+| [Quickstart](https://github.com/ChiefGyk3D/hypeman/blob/main/docs/QUICKSTART.md) | Build a complete announcement daemon in ~60 lines |
+| [Configuration reference](https://github.com/ChiefGyk3D/hypeman/blob/main/docs/CONFIGURATION.md) | Every env var, with defaults and worked examples |
+| [API reference](https://github.com/ChiefGyk3D/hypeman/blob/main/docs/API.md) | The full public surface, module by module |
+| [Design notes](https://github.com/ChiefGyk3D/hypeman/blob/main/docs/DESIGN.md) | Why it's shaped this way — the availability contract, opt-in failover, guardrail philosophy |
+| [Publishing](https://github.com/ChiefGyk3D/hypeman/blob/main/docs/PUBLISHING.md) | PyPI Trusted Publishing setup and release procedure |
+| [Contributing](https://github.com/ChiefGyk3D/hypeman/blob/main/CONTRIBUTING.md) | Dev setup, the non-negotiable contracts, how to add platforms/providers |
+| [Changelog](https://github.com/ChiefGyk3D/hypeman/blob/main/CHANGELOG.md) | Release history |
 
 ## The availability contract
 
@@ -176,7 +176,7 @@ daemons own their own prompts, polling, and state.
 Write the module, subclass `SocialPlatform`, add one line to `REGISTRY` in
 `hypeman_social/social/__init__.py`. Every daemon picks it up. (Threads is
 next.) Full checklist — extras guard, config docs, fake-client tests — in
-[CONTRIBUTING.md](CONTRIBUTING.md#adding-things).
+[CONTRIBUTING.md](https://github.com/ChiefGyk3D/hypeman/blob/main/CONTRIBUTING.md#adding-things).
 
 ## Development
 
