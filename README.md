@@ -51,6 +51,18 @@ Extras: `bluesky`, `mastodon`, `ollama`, `gemini`, `aws`, `vault`, `doppler`, `a
 
 Discord and Matrix need no extra — they're plain HTTP.
 
+## Documentation
+
+| Doc | What's in it |
+|---|---|
+| [Quickstart](docs/QUICKSTART.md) | Build a complete announcement daemon in ~60 lines |
+| [Configuration reference](docs/CONFIGURATION.md) | Every env var, with defaults and worked examples |
+| [API reference](docs/API.md) | The full public surface, module by module |
+| [Design notes](docs/DESIGN.md) | Why it's shaped this way — the availability contract, opt-in failover, guardrail philosophy |
+| [Publishing](docs/PUBLISHING.md) | PyPI Trusted Publishing setup and release procedure |
+| [Contributing](CONTRIBUTING.md) | Dev setup, the non-negotiable contracts, how to add platforms/providers |
+| [Changelog](CHANGELOG.md) | Release history |
+
 ## The availability contract
 
 **Never branch on `.enabled`. Always call `is_available()`.**
@@ -162,14 +174,21 @@ daemons own their own prompts, polling, and state.
 ## Adding a social network
 
 Write the module, subclass `SocialPlatform`, add one line to `REGISTRY` in
-`hypeman/social/__init__.py`. Every daemon picks it up. (Threads is next.)
+`hypeman_social/social/__init__.py`. Every daemon picks it up. (Threads is
+next.) Full checklist — extras guard, config docs, fake-client tests — in
+[CONTRIBUTING.md](CONTRIBUTING.md#adding-things).
 
 ## Development
 
 ```bash
-pip install -e ".[all,dev]"
+pip install -e ".[all,aws,vault,doppler,dev]"
+ruff check hypeman_social tests
 pytest
 ```
+
+CI runs the same lint and tests across Python 3.9–3.13, plus a bare-install
+job (the package must work with zero extras), a coverage gate, and a
+build + `twine check` of the sdist and wheel.
 
 ## License
 
