@@ -6,9 +6,17 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-09-04
+
 ### Added
 - Documentation suite: configuration reference, API reference, quickstart,
-  design notes, contributing guide.
+  design notes, contributing guide — linked from the README with absolute
+  URLs so they work on the PyPI project page.
+
+### Fixed
+- PEP 639 license metadata: the wheel now carries
+  `License-Expression: MPL-2.0`, so dependency scanners stop reporting
+  "Unknown License".
 
 ## [0.1.0] — 2026-09-04
 
@@ -49,4 +57,5 @@ Star-Daemon, which carried three diverging copies of this code.
   hints — enforced by a bare-install CI job. Python 3.9–3.13. Published to
   PyPI via Trusted Publishing (OIDC) on GitHub release.
 
+[0.1.1]: https://github.com/ChiefGyk3D/hypeman/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ChiefGyk3D/hypeman/releases/tag/v0.1.0
