@@ -5,6 +5,11 @@ The release workflow (`.github/workflows/release.yml`) publishes to PyPI using
 no long-lived API token stored in GitHub secrets. It runs automatically when a
 GitHub release is published.
 
+> **Status:** the one-time setup below is complete — `hypeman-social` 0.1.0
+> shipped via this pipeline on 2026-09-04
+> ([pypi.org/project/hypeman-social](https://pypi.org/project/hypeman-social/)).
+> For subsequent releases, jump to [Every release after that](#every-release-after-that).
+
 ## One-time setup
 
 Do these once, in order:
