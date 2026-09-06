@@ -104,11 +104,18 @@ def _doppler_lookup(*candidate_keys: str) -> Optional[str]:
 # Overloads so type checkers know a str default guarantees a str result —
 # callers doing int(get_config(..., default='20')) are provably safe.
 @overload
-def get_config(section: str, key: str, default: str) -> str: ...
+def get_config(section: str, key: str, default: str) -> str:
+    """A str default guarantees a str result."""
+
+
 @overload
-def get_config(section: str, key: str, default: None = None) -> Optional[str]: ...
+def get_config(section: str, key: str, default: None = None) -> Optional[str]:
+    """No default: the value may be absent."""
+
+
 @overload
-def get_config(section: str, key: str, default: Any) -> Any: ...
+def get_config(section: str, key: str, default: Any) -> Any:
+    """Any other default passes through unchanged."""
 
 
 def get_config(section: str, key: str, default: Any = None) -> Any:

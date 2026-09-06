@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import hypeman_social.social.bluesky as bluesky_module
+from hypeman_social.social import bluesky as bluesky_module
 from hypeman_social.social.base import EVENT_STAR
 from hypeman_social.social.bluesky import BlueskyPlatform
 from hypeman_social.social.discord import DiscordPlatform
