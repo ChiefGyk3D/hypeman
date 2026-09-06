@@ -17,6 +17,7 @@ import requests
 from hypeman_social.config import get_bool_config
 from hypeman_social.social.base import (
     EVENT_LIVE,
+    EVENT_STAR,
     EVENT_UPLOAD,
     SocialPlatform,
     event_kind,
@@ -25,6 +26,66 @@ from hypeman_social.social.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _star_embed(message: str, repo_url: str, stream_data: dict) -> dict:
+    """
+    Rich embed for a starred repository, ported from Star-Daemon's connector.
+
+    The announcement text lives in the embed description (with the role
+    mention alone in the content line), so the repository card and the words
+    about it read as one unit.
+    """
+    color = 0xFFD700  # Default gold
+    platform_title = "⭐ New Starred Repository"
+
+    if is_url_for_domain(repo_url, 'github.com'):
+        color = 0x6E5494  # GitHub purple
+        platform_title = "⭐ Starred on GitHub"
+    elif is_url_for_domain(repo_url, 'gitlab.com'):
+        color = 0xFC6D26  # GitLab orange
+        platform_title = "⭐ Starred on GitLab"
+
+    embed = {
+        "title": platform_title,
+        "description": message if message else "New repository starred!",
+        "url": repo_url,
+        "color": color,
+    }
+
+    fields = []
+    repo_data = stream_data.get('repo_data') or {}
+    repo_name = repo_data.get('full_name', repo_data.get('name', ''))
+    if repo_name:
+        fields.append({"name": "📦 Repository", "value": repo_name, "inline": False})
+
+    description = repo_data.get('description', '')
+    if description:
+        fields.append({"name": "📝 Description", "value": description[:1024], "inline": False})
+
+    language = repo_data.get('language', '')
+    if language:
+        fields.append({"name": "💻 Language", "value": language, "inline": True})
+
+    stars_count = repo_data.get('stargazers_count')
+    if stars_count is not None:
+        fields.append({"name": "⭐ Stars", "value": f"{stars_count:,}", "inline": True})
+
+    forks = repo_data.get('forks_count')
+    if forks is not None:
+        fields.append({"name": "🔀 Forks", "value": f"{forks:,}", "inline": True})
+
+    if fields:
+        embed["fields"] = fields
+
+    thumbnail_url = stream_data.get('thumbnail_url')
+    if not thumbnail_url and repo_data.get('owner'):
+        thumbnail_url = repo_data['owner'].get('avatar_url')
+    if thumbnail_url:
+        embed["thumbnail"] = {"url": thumbnail_url}
+
+    embed["footer"] = {"text": "Click to view repository"}
+    return embed
 
 
 
@@ -43,11 +104,11 @@ class DiscordPlatform(SocialPlatform):
         """
         super().__init__("Discord", **credentials)
         self.default_event_kind = default_event_kind
-        self.webhook_url = None  # Default webhook
-        self.webhook_urls = {}  # platform_name -> webhook_url mapping
-        self.role_id = None  # Default role
-        self.role_mentions = {}  # platform_name -> role_id mapping
-        self.active_messages = {}  # platform_name -> {message_id, webhook_url, last_update} tracking
+        self.webhook_url: Optional[str] = None  # Default webhook
+        self.webhook_urls: dict = {}  # platform_name -> webhook_url mapping
+        self.role_id: Optional[str] = None  # Default role
+        self.role_mentions: dict = {}  # platform_name -> role_id mapping
+        self.active_messages: dict = {}  # platform_name -> {message_id, webhook_url, last_update} tracking
         
     def authenticate(self):
         if not get_bool_config('Discord', 'enable_posting', default=False):
@@ -108,20 +169,21 @@ class DiscordPlatform(SocialPlatform):
             url_match = re.search(url_pattern, message)
             first_url = url_match.group() if url_match else None
             
+            # Is this an upload, a live broadcast, or a starred repo?
+            #
+            # This used to be inferred from the platform name, which is
+            # ambiguous: 'youtube' means a new upload to Boon-Tube and a
+            # live broadcast to stream-daemon, so the inference gave one of
+            # them the wrong embed. The caller states it explicitly now and
+            # the platform default only applies when they don't.
+            kind = event_kind(stream_data, default=self.default_event_kind)
+            is_star = kind == EVENT_STAR
+
             # Build Discord embed with rich card
             embed = None
-            if first_url and stream_data:
-                # Normalize platform name for comparisons (strip suffixes like -videos, -livestreams)
-                platform_base = platform_name.lower().split('-')[0] if platform_name else None
-                
-                # Is this an upload or a live broadcast?
-                #
-                # This used to be inferred from the platform name, which is
-                # ambiguous: 'youtube' means a new upload to Boon-Tube and a
-                # live broadcast to stream-daemon, so the inference gave one of
-                # them the wrong embed. The caller states it explicitly now and
-                # the platform default only applies when they don't.
-                kind = event_kind(stream_data, default=self.default_event_kind)
+            if first_url and is_star:
+                embed = _star_embed(message, first_url, stream_data or {})
+            elif first_url and stream_data:
                 is_video_upload = kind == EVENT_UPLOAD
                 
                 # Determine color and platform info from URL
@@ -189,21 +251,22 @@ class DiscordPlatform(SocialPlatform):
                 else:
                     embed["footer"] = {"text": "Click to watch the stream!"}
             
-            # Build content: LLM message + role mention
-            content = message  # Start with the LLM-generated message
-            
+            # Build content: LLM message + role mention. Star embeds carry the
+            # message in their description, so the content is just the mention.
+            content = '' if (embed is not None and is_star) else message
+
             # Add role mention if configured for this platform
             # Normalize platform name (strip suffixes like -videos, -livestreams)
             platform_base = platform_name.lower().split('-')[0] if platform_name else None
             if platform_base and platform_base in self.role_mentions:
                 role_id = self.role_mentions[platform_base]
-                content += f" <@&{role_id}>"
+                content = f"{content} <@&{role_id}>".strip()
             elif self.role_id:
                 # Use default role if no platform-specific role
-                content += f" <@&{self.role_id}>"
+                content = f"{content} <@&{self.role_id}>".strip()
             
             # Build webhook payload
-            data = {}
+            data: dict = {}
             if content:
                 data["content"] = content
             if embed:
@@ -307,7 +370,7 @@ class DiscordPlatform(SocialPlatform):
             content = msg_info.get('original_content', '')
             
             # Build update payload
-            data = {}
+            data: dict = {}
             if content:
                 data["content"] = content
             data["embeds"] = [embed]
@@ -423,7 +486,7 @@ class DiscordPlatform(SocialPlatform):
                 content = f"<@&{self.role_id}>"
             
             # Build update payload
-            data = {}
+            data: dict = {}
             if content:
                 data["content"] = content
             data["embeds"] = [embed]

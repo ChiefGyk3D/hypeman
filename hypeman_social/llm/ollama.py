@@ -19,7 +19,7 @@ posts, not a daemon restart.
 """
 
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from hypeman_social.config import get_config
 from hypeman_social.llm import guardrails
@@ -48,7 +48,7 @@ class OllamaLLM(BaseLLM):
 
     def __init__(self, profile: ContentProfile = GENERIC_PROFILE):
         super().__init__(profile=profile)
-        self.client = None
+        self.client: Optional[Any] = None
         self.host: Optional[str] = None
         self.model: Optional[str] = None
 
@@ -177,7 +177,7 @@ class OllamaLLM(BaseLLM):
         if capabilities is None and isinstance(info, dict):
             capabilities = info.get('capabilities')
 
-        return bool(capabilities) and 'thinking' in capabilities
+        return bool(capabilities) and 'thinking' in (capabilities or ())
 
     @staticmethod
     def _model_names(response) -> list:

@@ -1,0 +1,55 @@
+site_name: hypeman-social
+site_description: Shared core for announcement daemons — social publishing, LLM message generation, and health reporting
+site_url: https://chiefgyk3d.github.io/hypeman/
+repo_url: https://github.com/ChiefGyk3D/hypeman
+repo_name: ChiefGyk3D/hypeman
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  icon:
+    repo: fontawesome/brands/github
+  palette:
+    # Follows the visitor's OS preference, with a manual toggle.
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: amber
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - content.code.copy
+    - search.suggest
+
+nav:
+  - Home: index.md
+  - Quickstart: QUICKSTART.md
+  - Configuration reference: CONFIGURATION.md
+  - API reference: API.md
+  - Design notes: DESIGN.md
+  - Publishing: PUBLISHING.md
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - tables
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/ChiefGyk3D
+    - icon: fontawesome/brands/python
+      link: https://pypi.org/project/hypeman-social/
