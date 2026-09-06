@@ -111,7 +111,7 @@ and a health endpoint — none of it written by you.
    normal state (server rebooting, guardrails rejected the message), not an
    error. A missed announcement is worse than a boring one.
 2. **Post with `safe_post()`, never `post()`.** One network's outage must not
-   block the other three or crash the loop.
+   block the other networks or crash the loop.
 3. **Never branch on `.enabled` — ask `is_available()`.** Availability checks
    are allowed to *heal* the connection; a boolean you cached at startup can
    only ever go stale. This rule exists because of a real outage
@@ -129,7 +129,7 @@ and voice:
 
 | Daemon | Domain logic kept | hypeman provides |
 |---|---|---|
-| [Boon-Tube-Daemon](https://github.com/ChiefGyk3D/Boon-Tube-Daemon) | YouTube/TikTok polling, upload-announcement prompts (`VideoPostGenerator`) | all four networks, `VIDEO_PROFILE` guardrails, LLM failover, config |
+| [Boon-Tube-Daemon](https://github.com/ChiefGyk3D/Boon-Tube-Daemon) | YouTube/TikTok polling, upload-announcement prompts (`VideoPostGenerator`) | every network, `VIDEO_PROFILE` guardrails, LLM failover, config |
 | [Stream-Daemon](https://github.com/ChiefGyk3D/Stream-Daemon) | Twitch/YouTube/Kick live detection, go-live + thanks prompts, lenient strict-retry flow | networks, `STREAM_PROFILE`, provider plumbing, config |
 | [Star-Daemon](https://github.com/ChiefGyk3D/Star-Daemon) | GitHub star polling, repo-explainer prompt (`StarAnnouncer`) | `STAR_PROFILE` anti-hallucination guardrails, LLM failover |
 | [yomama-as-a-service](https://github.com/ChiefGyk3D/yomama-as-a-service) | Joke flavors, meanness that goes to eleven | LLM layer: Ollama + Gemini, retries, rate-limit handling |

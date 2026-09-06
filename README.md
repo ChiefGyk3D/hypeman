@@ -4,10 +4,12 @@
 [![PyPI](https://img.shields.io/pypi/v/hypeman-social)](https://pypi.org/project/hypeman-social/)
 [![Python versions](https://img.shields.io/pypi/pyversions/hypeman-social)](https://pypi.org/project/hypeman-social/)
 [![License: MPL 2.0](https://img.shields.io/badge/License-MPL_2.0-brightgreen.svg)](https://opensource.org/licenses/MPL-2.0)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/ChiefGyk3D/hypeman/badge)](https://scorecard.dev/viewer/?uri=github.com/ChiefGyk3D/hypeman)
+[![Docs](https://img.shields.io/badge/docs-site-blue)](https://chiefgyk3d.github.io/hypeman/)
 
 A hype man's entire job is announcing you loudly to a crowd. That's what this
 library does: it's the shared core behind a family of daemons that shout about
-your content on Bluesky, Mastodon, Discord, and Matrix.
+your content on Bluesky, Mastodon, Discord, Matrix, and Threads.
 
 | Daemon | Shouts when |
 |---|---|
@@ -49,9 +51,12 @@ pip install hypeman-social[bluesky,mastodon,ollama]
 
 Extras: `bluesky`, `mastodon`, `ollama`, `gemini`, `aws`, `vault`, `doppler`, `all`, `dev`.
 
-Discord and Matrix need no extra — they're plain HTTP.
+Discord, Matrix, and Threads need no extra — they're plain HTTP.
 
 ## Documentation
+
+The same docs are browsable as a site at
+[chiefgyk3d.github.io/hypeman](https://chiefgyk3d.github.io/hypeman/).
 
 | Doc | What's in it |
 |---|---|
@@ -104,6 +109,22 @@ LLM_FALLBACK_PROVIDER=gemini   # opt-in
 Failover is **opt-in by design**. If you chose Ollama specifically so your data
 stays on your network, silently shipping prompts to Google would be a betrayal,
 not a feature. When the primary recovers, hypeman switches back automatically.
+
+## Validated generation in one call
+
+```python
+message = llm.generate_validated(
+    lambda strict: build_prompt(title, strict_mode=strict),
+    title=title, username='chief', platform='bluesky',
+    char_limit=300, expected_hashtags=3,
+)
+```
+
+Generate, run the guardrails, and retry once with a stricter prompt when the
+first attempt has issues. If the retry still isn't clean, the original ships
+anyway — minor style problems beat silence — except for two hard vetoes:
+profanity (when the filter is on) and duplicates of recent posts. Every
+daemon used to reimplement this loop; now a fix to it reaches all of them.
 
 ## Content profiles
 
@@ -164,7 +185,7 @@ something that controls who can reach it.
 ```
 hypeman_social.config          config + secrets (env, .env, AWS, Vault, Doppler)
 hypeman_social.llm             Ollama + Gemini, guardrails, failover manager
-hypeman_social.social          Bluesky, Mastodon, Discord, Matrix
+hypeman_social.social          Bluesky, Mastodon, Discord, Matrix, Threads
 hypeman_social.observability   logging with rotation, health endpoints
 ```
 
@@ -174,8 +195,8 @@ daemons own their own prompts, polling, and state.
 ## Adding a social network
 
 Write the module, subclass `SocialPlatform`, add one line to `REGISTRY` in
-`hypeman_social/social/__init__.py`. Every daemon picks it up. (Threads is
-next.) Full checklist — extras guard, config docs, fake-client tests — in
+`hypeman_social/social/__init__.py`. Every daemon picks it up — that's
+exactly how Threads landed in 0.2.0. Full checklist — extras guard, config docs, fake-client tests — in
 [CONTRIBUTING.md](https://github.com/ChiefGyk3D/hypeman/blob/main/CONTRIBUTING.md#adding-things).
 
 ## Development
@@ -186,9 +207,11 @@ ruff check hypeman_social tests
 pytest
 ```
 
-CI runs the same lint and tests across Python 3.9–3.13, plus a bare-install
-job (the package must work with zero extras), a coverage gate, and a
-build + `twine check` of the sdist and wheel.
+CI runs the same lint and tests across Python 3.9–3.13, plus a mypy
+type-check (the package ships `py.typed`), a bare-install job (the package
+must work with zero extras), a coverage gate, and a build + `twine check` of
+the sdist and wheel. CodeQL and OpenSSF Scorecard run on every push to main,
+and Dependabot keeps the SHA-pinned actions and dependency floors current.
 
 ## License
 

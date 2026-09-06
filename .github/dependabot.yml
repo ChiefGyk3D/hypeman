@@ -1,0 +1,18 @@
+# Keeps the pinned GitHub Actions SHAs and Python dependency floors current.
+# Actions are pinned by commit SHA (supply-chain hygiene), so without this
+# they would silently age forever.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

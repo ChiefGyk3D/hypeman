@@ -54,7 +54,7 @@ enforces this:
   A health check that cries wolf gets ignored, and then it misses the real
   outage.
 - `SocialPlatform.safe_post()` never raises: one network having a bad day
-  doesn't take down the daemon or block the other three.
+  doesn't take down the daemon or block the others.
 - Optional SDKs fail closed at `authenticate()` with an install hint —
   never at import. A daemon that only posts to Discord must not need
   atproto on disk. (CI proves this with a bare-install job.)

@@ -41,7 +41,7 @@ env lookups, it doesn't crash the daemon.
 ```python
 from hypeman_social.social import (
     SocialPlatform, REGISTRY,
-    BlueskyPlatform, MastodonPlatform, DiscordPlatform, MatrixPlatform,
+    BlueskyPlatform, MastodonPlatform, DiscordPlatform, MatrixPlatform, ThreadsPlatform,
     EVENT_UPLOAD, EVENT_LIVE, EVENT_END, EVENT_STAR,
     event_kind, is_url_for_domain, platform_secret,
 )
@@ -58,7 +58,7 @@ SDK is missing fails closed at `authenticate()` with a
 | `__init__` | `(name, enabled=False, **credentials)` | Keyword credentials override config lookup — for tests and daemons that wire creds themselves. `None` values are ignored |
 | `authenticate` | `() -> bool` | Abstract. Establish credentials |
 | `post` | `(message, reply_to_id=None, platform_name=None, stream_data=None) -> str \| None` | Abstract. Returns the new post's id (for threading) or None |
-| `safe_post` | `(message, **kwargs) -> str \| None` | **Use this in daemons.** Never raises: one network having a bad day must not take down the daemon or block the other three |
+| `safe_post` | `(message, **kwargs) -> str \| None` | **Use this in daemons.** Never raises: one network having a bad day must not take down the daemon or block the others |
 | `is_ready` | `() -> bool` | enabled and authenticated |
 | `test_connection` | `() -> bool` | Cheap liveness probe; platforms override where the API allows |
 | `credential` | `(key, default=None) -> str \| None` | Constructor override, else `platform_secret` |
@@ -67,7 +67,7 @@ SDK is missing fails closed at `authenticate()` with a
 
 ### `REGISTRY`
 
-`{'bluesky': BlueskyPlatform, 'mastodon': ..., 'discord': ..., 'matrix': ...}` —
+`{'bluesky': BlueskyPlatform, 'mastodon': ..., 'discord': ..., 'matrix': ..., 'threads': ThreadsPlatform}` —
 iterate it to construct every available network without naming them:
 
 ```python
@@ -88,7 +88,7 @@ decides embed style, colors, and which metadata fields make sense:
 | `EVENT_UPLOAD` | `'upload'` | Boon-Tube-Daemon — "🎬 New YouTube Video" embeds, no viewer counts |
 | `EVENT_LIVE` | `'live'` | stream-daemon — "🔴 Live" embeds with viewer count and category, edited in place on Discord |
 | `EVENT_END` | `'end'` | stream ended — muted embed keeping the VOD link |
-| `EVENT_STAR` | `'star'` | Star-Daemon — repository announcements |
+| `EVENT_STAR` | `'star'` | Star-Daemon — repository announcements. Discord renders a gold/GitHub-purple embed with 📦/📝/💻/⭐/🔀 fields, Bluesky an external card built from `repo_data`, Mastodon a text card, Matrix HTML paragraphs |
 
 Pass it explicitly. It used to be inferred from the platform name, and
 "youtube" is ambiguous between an upload and a live broadcast — the inference
@@ -110,6 +110,7 @@ Free-form dict; recognized keys:
 | `is_live` | Live vs video for Bluesky card copy |
 | `description` | Bluesky card description for videos |
 | `event_kind` | See above |
+| `repo_data` | `EVENT_STAR` only: the repository object from the GitHub/GitLab API. Recognized fields: `full_name`, `name`, `description`, `language`, `stargazers_count`, `forks_count`, `owner.avatar_url` |
 
 ### Helpers
 
@@ -140,6 +141,7 @@ implementation detail, visible in `status()`, not at the call site.
 | `authenticate` | `() -> bool` | False only when `LLM_ENABLE` is off or no provider constructs. A primary that fails to *connect* is *not* fatal — it keeps retrying in the background |
 | `is_available` | `() -> bool` | May heal a downed provider — the poll loop asking "can I use AI?" is what reconnects it |
 | `generate` | `(prompt, max_tokens=None) -> str \| None` | Primary first, then the fallback chain. None = use your template |
+| `generate_validated` | `(build_prompt, *, title='', username='', platform='generic', char_limit=500, expected_hashtags=0, max_tokens=None) -> str \| None` | Generate → guardrails → one stricter retry. `build_prompt` is a prompt string or a `(strict: bool) -> str` callable. Leniently ships the original when the retry still has issues (style problems beat silence), with two hard vetoes: profanity when the filter is on, and duplicates. None = use your template |
 | `apply_guardrails` | `(message, title, username, platform, char_limit, expected_hashtag_count=0) -> (str \| None, list[str])` | Full quality gauntlet; `(None, issues)` means don't post it |
 | `heartbeat` | `(min_interval=None) -> bool` | Rate-limited liveness probe across every provider; call once per poll cycle so recovery is noticed on your schedule |
 | `is_duplicate_message` / `add_to_message_cache` | | Dedup lives here, not on a provider, so failover doesn't wipe the recently-posted history |

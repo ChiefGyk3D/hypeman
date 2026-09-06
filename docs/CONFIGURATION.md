@@ -242,6 +242,29 @@ Behavior: HTML-formatted messages with clickable links and per-source
 headers; replies use `m.in_reply_to`. Matrix cannot edit messages, so no
 live viewer-count updates.
 
+## Social: Threads
+
+No extra needed — the Threads Graph API is plain HTTPS.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `THREADS_ENABLE_POSTING` | Enable the platform | `false` |
+| `THREADS_ACCESS_TOKEN` | Long-lived user access token | — |
+| `THREADS_USER_ID` | Numeric Threads user ID | — |
+
+Behavior: two-step publish (create a media container, then publish it);
+500-character limit enforced with URL-preserving trims; the first URL in the
+message is attached as an explicit link-preview card; replies thread via
+`reply_to_id`.
+
+Getting credentials: create a Meta app at
+[developers.facebook.com](https://developers.facebook.com/), add the
+**Threads API** use case, grant `threads_basic` and
+`threads_content_publish`, then generate a long-lived access token for your
+account. Your numeric user ID comes back from
+`GET https://graph.threads.net/v1.0/me?fields=id`. Long-lived tokens last
+~60 days; refresh them with `GET .../refresh_access_token` before expiry.
+
 ## Logging
 
 Optional; use `configure_logging()` from `hypeman_social.observability`.

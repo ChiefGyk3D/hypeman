@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hypeman-social"
-version = "0.1.1"
+version = "0.2.0"
 description = "Shared core for announcement daemons: social publishing, LLM message generation, and health reporting"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -58,6 +58,13 @@ dev = [
     "pytest-cov>=5.0.0",
     "pyflakes>=3.2.0",
     "ruff>=0.6.0",
+    "mypy>=1.10.0",
+]
+
+# Building the documentation site (mkdocs serve / mkdocs build).
+docs = [
+    "mkdocs>=1.6.0",
+    "mkdocs-material>=9.5.0",
 ]
 
 [project.urls]
@@ -66,6 +73,20 @@ Issues = "https://github.com/ChiefGyk3D/hypeman/issues"
 
 [tool.setuptools.packages.find]
 include = ["hypeman_social*"]
+
+[tool.setuptools.package-data]
+# PEP 561: ships the py.typed marker so mypy/pyright type-check against the
+# library's own annotations in downstream projects.
+hypeman_social = ["py.typed"]
+
+[tool.mypy]
+# Gradual typing: annotated functions are checked strictly, unannotated ones
+# are left alone until they grow annotations. Every third-party SDK here
+# (atproto, Mastodon.py, ollama, ...) ships without stubs, so missing-import
+# errors are noise rather than signal.
+ignore_missing_imports = true
+warn_redundant_casts = true
+no_implicit_optional = false
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

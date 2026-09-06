@@ -15,7 +15,7 @@ import logging
 import os
 import threading
 import time
-from typing import Optional
+from typing import Any, Optional
 
 from hypeman_social.config import get_config, get_secret
 from hypeman_social.llm.base import BaseLLM
@@ -45,7 +45,7 @@ class GeminiLLM(BaseLLM):
 
     def __init__(self, profile: ContentProfile = GENERIC_PROFILE):
         super().__init__(profile=profile)
-        self.client = None
+        self.client: Optional[Any] = None
         self.model: Optional[str] = None
         self.api_key: Optional[str] = None
 

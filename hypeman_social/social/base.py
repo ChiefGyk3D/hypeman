@@ -163,7 +163,7 @@ class SocialPlatform(ABC):
         Post without ever raising.
 
         One social network having a bad day should not take down the daemon or
-        stop the other three platforms from getting their announcement.
+        stop the other platforms from getting their announcement.
         """
         if not self.is_ready():
             logger.debug(f"⊘ {self.name} not ready, skipping post")

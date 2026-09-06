@@ -182,10 +182,56 @@ class BlueskyPlatform(SocialPlatform):
             
             # Create embed card for the first URL if found
             embed = None
+            repo_data = stream_data.get('repo_data') if stream_data else None
             if first_url:
                 try:
+                    # Starred-repository card: use the repository metadata the
+                    # caller already fetched from the GitHub/GitLab API rather
+                    # than scraping the page (ported from Star-Daemon).
+                    if repo_data and (is_url_for_domain(first_url, 'github.com')
+                                      or is_url_for_domain(first_url, 'gitlab.com')):
+                        logger.info("ℹ Using repository metadata for embed")
+
+                        title = repo_data.get('full_name', repo_data.get('name', 'Repository'))
+                        description = (repo_data.get('description') or '')[:1000]
+
+                        # Thumbnail: explicit override first, then owner avatar
+                        thumbnail_url = (stream_data or {}).get('thumbnail_url')
+                        if not thumbnail_url and repo_data.get('owner'):
+                            thumbnail_url = repo_data['owner'].get('avatar_url')
+
+                        thumb_blob = None
+                        if thumbnail_url:
+                            try:
+                                import requests
+                                headers = {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                                }
+                                img_response = requests.get(thumbnail_url, headers=headers, timeout=10)
+                                if img_response.status_code == 200:
+                                    upload_response = self.client.upload_blob(img_response.content)
+                                    thumb_blob = upload_response.blob if hasattr(upload_response, 'blob') else None
+                            except Exception as img_error:
+                                logger.warning(f"⚠ Could not upload repository thumbnail: {img_error}")
+
+                        stars_count = repo_data.get('stargazers_count', 0)
+                        language = repo_data.get('language', '')
+                        embed_desc = f"⭐ {stars_count:,} stars"
+                        if language:
+                            embed_desc += f" • {language}"
+                        if description:
+                            embed_desc += f"\n\n{description}"
+
+                        embed = models.AppBskyEmbedExternal.Main(
+                            external=models.AppBskyEmbedExternal.External(
+                                uri=first_url,
+                                title=title[:300] if title else 'Repository',
+                                description=embed_desc[:1000],
+                                thumb=thumb_blob if thumb_blob else None
+                            )
+                        )
                     # Special handling for Kick with stream_data - use provided metadata
-                    if is_url_for_domain(first_url, 'kick.com') and stream_data:
+                    elif is_url_for_domain(first_url, 'kick.com') and stream_data:
                         logger.info("ℹ Using stream metadata for Kick embed (CloudFlare bypass)")
                         
                         title = stream_data.get('title', 'Live on Kick')
@@ -300,7 +346,7 @@ class BlueskyPlatform(SocialPlatform):
                         
                         title = og_title['content'] if og_title and og_title.get('content') else first_url
                         description = og_description['content'] if og_description and og_description.get('content') else ''
-                        image_url = og_image['content'] if og_image and og_image.get('content') else None
+                        image_url = str(og_image['content']) if og_image and og_image.get('content') else None
                         
                         # Upload image to Bluesky if available
                         thumb_blob = None

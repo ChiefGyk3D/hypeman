@@ -129,8 +129,8 @@ class TestSocialPlatformBase:
 
 
 class TestRegistry:
-    def test_all_four_networks_present(self):
-        assert set(REGISTRY) == {'bluesky', 'mastodon', 'discord', 'matrix'}
+    def test_all_networks_present(self):
+        assert set(REGISTRY) == {'bluesky', 'mastodon', 'discord', 'matrix', 'threads'}
 
     def test_names_match_keys(self):
         for key, cls in REGISTRY.items():
