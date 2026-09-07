@@ -10,9 +10,18 @@ import logging
 import re
 from typing import Optional
 from urllib.parse import urlparse
-from atproto import Client, models, client_utils
+
 from hypeman_social.config import get_bool_config, get_config
 from hypeman_social.social.base import SocialPlatform, is_url_for_domain, platform_secret
+
+# atproto is the 'bluesky' extra. Importing this module without it must not
+# raise — the daemon may only have the extras for the networks it uses.
+try:
+    from atproto import Client, client_utils, models
+    ATPROTO_AVAILABLE = True
+except ImportError:
+    Client = models = client_utils = None  # type: ignore[assignment]
+    ATPROTO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +53,13 @@ class BlueskyPlatform(SocialPlatform):
         
     def authenticate(self):
         if not get_bool_config('Bluesky', 'enable_posting', default=False):
+            return False
+
+        if not ATPROTO_AVAILABLE:
+            logger.error(
+                "✗ Bluesky enabled but the atproto client is not installed. "
+                "Run: pip install 'hypeman-social[bluesky]'"
+            )
             return False
             
         handle = get_config('Bluesky', 'handle')
@@ -146,7 +162,7 @@ class BlueskyPlatform(SocialPlatform):
                 matched_text = match.group()
                 
                 # Check if it's a URL or hashtag
-                if matched_text.startswith('http://') or matched_text.startswith('https://'):
+                if matched_text.startswith(('http://', 'https://')):
                     # Add URL as clickable link
                     text_builder.link(matched_text, matched_text)
                     
@@ -166,11 +182,57 @@ class BlueskyPlatform(SocialPlatform):
             
             # Create embed card for the first URL if found
             embed = None
+            repo_data = stream_data.get('repo_data') if stream_data else None
             if first_url:
                 try:
+                    # Starred-repository card: use the repository metadata the
+                    # caller already fetched from the GitHub/GitLab API rather
+                    # than scraping the page (ported from Star-Daemon).
+                    if repo_data and (is_url_for_domain(first_url, 'github.com')
+                                      or is_url_for_domain(first_url, 'gitlab.com')):
+                        logger.info("ℹ Using repository metadata for embed")
+
+                        title = repo_data.get('full_name', repo_data.get('name', 'Repository'))
+                        description = (repo_data.get('description') or '')[:1000]
+
+                        # Thumbnail: explicit override first, then owner avatar
+                        thumbnail_url = (stream_data or {}).get('thumbnail_url')
+                        if not thumbnail_url and repo_data.get('owner'):
+                            thumbnail_url = repo_data['owner'].get('avatar_url')
+
+                        thumb_blob = None
+                        if thumbnail_url:
+                            try:
+                                import requests
+                                headers = {
+                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+                                }
+                                img_response = requests.get(thumbnail_url, headers=headers, timeout=10)
+                                if img_response.status_code == 200:
+                                    upload_response = self.client.upload_blob(img_response.content)
+                                    thumb_blob = upload_response.blob if hasattr(upload_response, 'blob') else None
+                            except Exception as img_error:
+                                logger.warning(f"⚠ Could not upload repository thumbnail: {img_error}")
+
+                        stars_count = repo_data.get('stargazers_count', 0)
+                        language = repo_data.get('language', '')
+                        embed_desc = f"⭐ {stars_count:,} stars"
+                        if language:
+                            embed_desc += f" • {language}"
+                        if description:
+                            embed_desc += f"\n\n{description}"
+
+                        embed = models.AppBskyEmbedExternal.Main(
+                            external=models.AppBskyEmbedExternal.External(
+                                uri=first_url,
+                                title=title[:300] if title else 'Repository',
+                                description=embed_desc[:1000],
+                                thumb=thumb_blob if thumb_blob else None
+                            )
+                        )
                     # Special handling for Kick with stream_data - use provided metadata
-                    if is_url_for_domain(first_url, 'kick.com') and stream_data:
-                        logger.info(f"ℹ Using stream metadata for Kick embed (CloudFlare bypass)")
+                    elif is_url_for_domain(first_url, 'kick.com') and stream_data:
+                        logger.info("ℹ Using stream metadata for Kick embed (CloudFlare bypass)")
                         
                         title = stream_data.get('title', 'Live on Kick')
                         thumbnail_url = stream_data.get('thumbnail_url')
@@ -192,7 +254,7 @@ class BlueskyPlatform(SocialPlatform):
                         
                         # Create external embed with stream metadata (no viewer count to avoid showing 0 at start)
                         game_name = stream_data.get('game_name', '')
-                        description = f"🔴 LIVE"
+                        description = "🔴 LIVE"
                         if game_name:
                             description += f" • {game_name}"
                         
@@ -207,11 +269,11 @@ class BlueskyPlatform(SocialPlatform):
                     elif is_url_for_domain(first_url, 'kick.com'):
                         # Kick.com without stream_data - blocks automated requests with CloudFlare security policies
                         # Links will still be clickable, just without embed cards
-                        logger.info(f"ℹ Kick.com blocks automated requests, posting with clickable link only")
+                        logger.info("ℹ Kick.com blocks automated requests, posting with clickable link only")
                         embed = None
                     elif stream_data and (is_url_for_domain(first_url, 'twitch.tv') or is_url_for_domain(first_url, 'youtube.com') or is_url_for_domain(first_url, 'youtu.be')):
                         # Use stream_data for Twitch/YouTube if available (more reliable than scraping)
-                        logger.info(f"ℹ Using stream metadata for embed")
+                        logger.info("ℹ Using stream metadata for embed")
                         
                         title = stream_data.get('title', 'Video')
                         thumbnail_url = stream_data.get('thumbnail_url')
@@ -237,7 +299,7 @@ class BlueskyPlatform(SocialPlatform):
                         # Create description based on content type
                         if is_live:
                             game_name = stream_data.get('game_name', '')
-                            description = f"🔴 LIVE"
+                            description = "🔴 LIVE"
                             if game_name:
                                 description += f" • {game_name}"
                         else:
@@ -284,7 +346,7 @@ class BlueskyPlatform(SocialPlatform):
                         
                         title = og_title['content'] if og_title and og_title.get('content') else first_url
                         description = og_description['content'] if og_description and og_description.get('content') else ''
-                        image_url = og_image['content'] if og_image and og_image.get('content') else None
+                        image_url = str(og_image['content']) if og_image and og_image.get('content') else None
                         
                         # Upload image to Bluesky if available
                         thumb_blob = None
@@ -333,7 +395,7 @@ class BlueskyPlatform(SocialPlatform):
                     if match.start() > last_pos:
                         text_builder.text(message[last_pos:match.start()])
                     matched_text = match.group()
-                    if matched_text.startswith('http://') or matched_text.startswith('https://'):
+                    if matched_text.startswith(('http://', 'https://')):
                         text_builder.link(matched_text, matched_text)
                         if first_url is None:
                             first_url = matched_text
@@ -352,7 +414,7 @@ class BlueskyPlatform(SocialPlatform):
                     parent_response = self.client.app.bsky.feed.get_posts({'uris': [reply_to_id]})
                     
                     if not parent_response or not hasattr(parent_response, 'posts') or not parent_response.posts:
-                        logger.warning(f"⚠ Could not fetch parent post, posting without thread")
+                        logger.warning("⚠ Could not fetch parent post, posting without thread")
                         response = self.client.send_post(text_builder, embed=embed)
                         return response.uri if hasattr(response, 'uri') else None
                     

@@ -11,3 +11,6 @@ htmlcov/
 .pytest_cache/
 .ruff_cache/
 *.log
+
+# mkdocs build output
+site/

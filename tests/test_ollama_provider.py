@@ -127,3 +127,80 @@ def test_generating_without_a_client_raises_a_connection_error(llm):
     """
     with pytest.raises(ConnectionError):
         llm._raw_generate("prompt", 150)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Explicit think control for thinking-capable models
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _capture_generate(calls):
+    def generate(**kwargs):
+        calls.append(kwargs)
+        return {'response': 'a post', 'thinking': ''}
+    return generate
+
+
+def test_think_false_sent_when_model_thinks_but_mode_is_off(monkeypatch):
+    """
+    Hybrid reasoning models (gemma4, qwen3) think by default, and generate()
+    withholds the reasoning — the whole num_predict budget goes to thoughts we
+    never see and the content comes back empty. With thinking mode off, the
+    request must say think=False so the model answers directly.
+    """
+    monkeypatch.setenv('LLM_ENABLE_THINKING_MODE', 'false')
+
+    calls = []
+    llm = OllamaLLM()
+    llm._supports_thinking = True
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert calls[0]['think'] is False
+
+
+def test_think_true_sent_when_thinking_mode_is_on(monkeypatch):
+    monkeypatch.setenv('LLM_ENABLE_THINKING_MODE', 'true')
+
+    calls = []
+    llm = OllamaLLM()
+    llm._supports_thinking = True
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert calls[0]['think'] is True
+
+
+def test_think_not_sent_for_non_thinking_models():
+    """
+    Old Ollama servers predate the think parameter; models without the
+    capability must never see it.
+    """
+    calls = []
+    llm = OllamaLLM()
+    llm._supports_thinking = False
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert 'think' not in calls[0]
+
+
+def test_detects_thinking_capability_from_show():
+    llm = OllamaLLM()
+    llm.model = 'gemma4:12b'
+
+    client = SimpleNamespace(
+        show=lambda model: {'capabilities': ['completion', 'thinking']})
+    assert llm._detect_thinking_support(client) is True
+
+    client = SimpleNamespace(show=lambda model: {'capabilities': ['completion']})
+    assert llm._detect_thinking_support(client) is False
+
+
+def test_thinking_detection_failure_means_no_think_param():
+    """A server without /api/show capabilities just gets the old behaviour."""
+    def boom(model):
+        raise RuntimeError("404")
+
+    llm = OllamaLLM()
+    llm.model = 'gemma3:4b'
+    assert llm._detect_thinking_support(SimpleNamespace(show=boom)) is False

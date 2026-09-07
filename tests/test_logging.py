@@ -5,7 +5,6 @@
 """Tests for log rotation, level control, and repeat suppression."""
 
 import logging
-import os
 
 import pytest
 
@@ -232,7 +231,8 @@ def test_doppler_failure_is_cached_as_empty(monkeypatch):
         def secrets(self):
             raise RuntimeError("TooManyRequestsException")
 
-    import sys, types
+    import sys
+    import types
     fake_module = types.ModuleType('dopplersdk')
     fake_module.DopplerSDK = BoomSDK
     monkeypatch.setitem(sys.modules, 'dopplersdk', fake_module)

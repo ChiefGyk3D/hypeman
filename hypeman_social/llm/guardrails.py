@@ -19,7 +19,7 @@ import logging
 import re
 from typing import List, Optional, Set, Tuple
 
-from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
 logger = logging.getLogger(__name__)
 

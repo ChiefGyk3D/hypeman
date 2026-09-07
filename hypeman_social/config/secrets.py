@@ -31,7 +31,7 @@ _PLACEHOLDER_PREFIX = 'YOUR_'
 # genuinely confusing way to lose an afternoon.
 #
 # One fetch per process. Call reset_secret_cache() to force a re-read.
-_doppler_cache = None
+_doppler_cache: Optional[Dict[str, str]] = None
 _doppler_cache_lock = threading.Lock()
 
 

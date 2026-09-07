@@ -26,7 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from hypeman_social.config import get_bool_config, get_config
 from hypeman_social.llm.base import BaseLLM
-from hypeman_social.llm.profiles import ContentProfile, GENERIC_PROFILE
+from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +39,14 @@ def _normalize_for_dedup(message: str) -> str:
     return ' '.join(text.lower().split())
 
 
-def _build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
-    """Instantiate a provider by name. Returns None for an unknown name."""
+def build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
+    """
+    Instantiate a provider by name ('ollama' or 'gemini').
+
+    Public so daemons can pin a specific backend when they need to; most
+    callers want LLMManager, which adds failover on top. Returns None for an
+    unknown or empty name.
+    """
     name = (name or '').strip().lower()
 
     if name == 'ollama':
@@ -98,7 +104,7 @@ class LLMManager:
             return False
 
         primary_name = get_config('LLM', 'provider', default='gemini')
-        self.primary = _build_provider(primary_name, self.profile)
+        self.primary = build_provider(primary_name, self.profile)
 
         if self.primary is None:
             logger.error(f"✗ Could not construct primary LLM provider '{primary_name}'")
@@ -113,7 +119,7 @@ class LLMManager:
         # in order. One name behaves exactly as before.
         self.fallbacks = []
         for name in self._fallback_names(primary_name):
-            provider = _build_provider(name, self.profile)
+            provider = build_provider(name, self.profile)
             if provider is None:
                 continue
             if provider.authenticate():
@@ -271,6 +277,105 @@ class LLMManager:
             logger.warning(f"⚠ {provider.provider_name} returned nothing, trying next provider")
 
         return None
+
+    def generate_validated(
+        self,
+        build_prompt,
+        *,
+        title: str = '',
+        username: str = '',
+        platform: str = 'generic',
+        char_limit: int = 500,
+        expected_hashtags: int = 0,
+        max_tokens: Optional[int] = None,
+    ) -> Optional[str]:
+        """
+        Generate a message, run guardrails, and retry once with a stricter
+        prompt when the first attempt has issues.
+
+        This is the flow every daemon reimplemented on top of generate() +
+        apply_guardrails(); it lives here now so a fix to it reaches all of
+        them.
+
+        Deliberately lenient at the end: when the strict retry still has
+        issues, the original message ships anyway (minor style problems beat
+        silence) — with two hard vetoes: profanity when the filter is on, and
+        a duplicate of something recently posted.
+
+        Args:
+            build_prompt: Either a prompt string, or a callable taking one
+                bool (strict_mode) and returning the prompt — the callable
+                form lets the retry actually tighten the instructions.
+            title: Source title, for relevance checks.
+            username: Account name, used to strip self-referential hashtags.
+            platform: Target social platform name for platform-specific checks.
+            char_limit: Character budget the message must fit.
+            expected_hashtags: Exactly how many hashtags are expected (0 = any).
+            max_tokens: Optional per-call token cap passed to the provider.
+
+        Returns:
+            A validated (or leniently accepted) message, or None when
+            generation failed outright or a hard veto fired. Callers fall back
+            to their static templates on None.
+        """
+        if not self.enabled:
+            return None
+
+        prompt_for = build_prompt if callable(build_prompt) else (lambda strict: build_prompt)
+
+        raw = self.generate(prompt_for(False), max_tokens=max_tokens)
+        if not raw:
+            return None
+
+        message, issues = self.apply_guardrails(
+            raw, title, username, platform, char_limit, expected_hashtags)
+        if message:
+            return message
+
+        preview = ', '.join(issues[:3]) + ('...' if len(issues) > 3 else '')
+        logger.warning(f"⚠ Generated message has {len(issues)} issue(s): {preview}")
+        logger.info("🔄 Retrying with stricter prompt...")
+
+        retry_raw = self.generate(prompt_for(True), max_tokens=max_tokens)
+        if retry_raw:
+            retry_message, retry_issues = self.apply_guardrails(
+                retry_raw, title, username, platform, char_limit, expected_hashtags)
+            if retry_message:
+                logger.info("✅ Retry produced valid message, using it")
+                return retry_message
+            logger.warning(
+                f"⚠ Retry still has issues: {', '.join(retry_issues[:3])}, using original")
+        else:
+            logger.warning("⚠ Retry failed, using original message despite issues")
+
+        return self._accept_leniently(raw, username, char_limit)
+
+    def _accept_leniently(self, raw: str, username: str, char_limit: int) -> Optional[str]:
+        """
+        Clean up a message that failed validation and ship it anyway,
+        unless a hard veto (profanity, duplicate) applies.
+        """
+        from hypeman_social.llm import guardrails
+
+        message = raw.strip().strip('"').strip()
+        if username:
+            message = guardrails.validate_hashtags_against_username(message, username)
+        message = guardrails.safe_trim(message, char_limit)
+
+        provider = self._guardrail_provider()
+        if provider is not None and provider.enable_profanity_filter:
+            has_profanity, found = guardrails.contains_profanity(
+                message, provider.profanity_severity)
+            if has_profanity:
+                logger.warning(f"✗ Dropping message, contains profanity: {', '.join(found)}")
+                return None
+
+        if self.is_duplicate_message(message):
+            logger.warning("✗ Dropping message, duplicate of a recent announcement")
+            return None
+
+        self.add_to_message_cache(message)
+        return message
 
     def _providers_in_order(self) -> List[Tuple[BaseLLM, bool]]:
         """Providers to try, primary first, paired with an is_fallback flag."""

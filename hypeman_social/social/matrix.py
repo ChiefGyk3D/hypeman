@@ -13,9 +13,17 @@ import logging
 import re
 from typing import Optional
 from urllib.parse import quote
+
 import requests
+
 from hypeman_social.config import get_bool_config
-from hypeman_social.social.base import SocialPlatform, is_url_for_domain, platform_secret
+from hypeman_social.social.base import (
+    EVENT_STAR,
+    SocialPlatform,
+    event_kind,
+    is_url_for_domain,
+    platform_secret,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +76,7 @@ class MatrixPlatform(SocialPlatform):
             if not self.access_token:
                 logger.error("✗ Matrix login failed - check username/password")
                 return False
-            logger.info(f"✓ Matrix logged in and obtained access token")
+            logger.info("✓ Matrix logged in and obtained access token")
         else:
             # Fall back to static access token
             logger.info("Using static access token authentication")
@@ -112,7 +120,7 @@ class MatrixPlatform(SocialPlatform):
                     logger.info(f"✓ Obtained Matrix access token (expires: {data.get('expires_in_ms', 'never')})")
                     return access_token
                 else:
-                    logger.error(f"✗ Matrix login succeeded but no access_token in response")
+                    logger.error("✗ Matrix login succeeded but no access_token in response")
             else:
                 logger.error(f"✗ Matrix login failed: {response.status_code}")
             
@@ -139,12 +147,46 @@ class MatrixPlatform(SocialPlatform):
             html_body = message
             plain_body = message
             
+            repo_data = stream_data.get('repo_data') if stream_data else None
+            is_star = (
+                event_kind(stream_data, default='') == EVENT_STAR
+                or repo_data is not None
+            )
+
             if first_url:
                 # Make URL clickable in HTML
                 html_body = re.sub(url_pattern, f'<a href="{first_url}">{first_url}</a>', message)
-                
+
                 # Add platform-specific styling
-                if is_url_for_domain(first_url, 'twitch.tv'):
+                if is_star:
+                    if is_url_for_domain(first_url, 'github.com'):
+                        heading = '⭐ Starred on GitHub'
+                    elif is_url_for_domain(first_url, 'gitlab.com'):
+                        heading = '⭐ Starred on GitLab'
+                    else:
+                        heading = '⭐ New Star'
+                    html_body = f'<p><strong>{heading}</strong></p><p>{html_body}</p>'
+
+                    # Repository card, ported from Star-Daemon's connector
+                    if repo_data:
+                        repo_name = repo_data.get('full_name', repo_data.get('name', ''))
+                        description = repo_data.get('description', '')
+                        language = repo_data.get('language', '')
+                        stars_count = repo_data.get('stargazers_count')
+
+                        if repo_name:
+                            html_body += f'<p><strong>📦 {repo_name}</strong></p>'
+                        if description:
+                            html_body += f'<p><em>{description}</em></p>'
+
+                        info_parts = []
+                        if language:
+                            info_parts.append(f'💻 {language}')
+                        if stars_count is not None:
+                            info_parts.append(f'⭐ {stars_count:,} stars')
+                        if info_parts:
+                            html_body += f'<p>{" • ".join(info_parts)}</p>'
+                elif is_url_for_domain(first_url, 'twitch.tv'):
                     html_body = f'<p><strong>🟣 Live on Twitch!</strong></p><p>{html_body}</p>'
                 elif is_url_for_domain(first_url, 'youtube.com') or is_url_for_domain(first_url, 'youtu.be'):
                     html_body = f'<p><strong>🔴 Live on YouTube!</strong></p><p>{html_body}</p>'
@@ -152,7 +194,7 @@ class MatrixPlatform(SocialPlatform):
                     html_body = f'<p><strong>🟢 Live on Kick!</strong></p><p>{html_body}</p>'
             
             # Build Matrix message event
-            event_data = {
+            event_data: dict = {
                 "msgtype": "m.text",
                 "body": plain_body,
                 "format": "org.matrix.custom.html",
@@ -179,7 +221,7 @@ class MatrixPlatform(SocialPlatform):
             if response.status_code == 200:
                 data = response.json()
                 event_id = data.get('event_id')
-                logger.info(f"✓ Matrix message posted")
+                logger.info("✓ Matrix message posted")
                 return event_id
             else:
                 logger.warning(f"⚠ Matrix post failed with status {response.status_code}: {response.text}")

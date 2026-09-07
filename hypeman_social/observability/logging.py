@@ -30,7 +30,7 @@ import logging.handlers
 import os
 import sys
 import time
-from typing import Optional
+from typing import Dict, List, Optional
 
 from hypeman_social.config import get_bool_config, get_config, get_int_config
 
@@ -68,7 +68,8 @@ class RateLimitFilter(logging.Filter):
         super().__init__()
         self.window = window_seconds
         self.max_level = max_level
-        self._seen = {}  # message -> [last_emitted, suppressed_count]
+        # message -> [last_emitted, suppressed_count]
+        self._seen: Dict[str, List[float]] = {}
 
     def filter(self, record: logging.LogRecord) -> bool:
         if record.levelno > self.max_level or self.window <= 0:
@@ -154,7 +155,7 @@ def configure_logging(
     dedupe_seconds = get_int_config('Log', 'dedupe_seconds', default=0)
     rate_filter = RateLimitFilter(dedupe_seconds) if dedupe_seconds > 0 else None
 
-    handlers = []
+    handlers: List[logging.Handler] = []
 
     if get_bool_config('Log', 'to_stdout', default=True):
         stream_handler = logging.StreamHandler(sys.stdout)

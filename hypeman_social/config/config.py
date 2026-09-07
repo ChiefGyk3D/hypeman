@@ -19,7 +19,7 @@ the sink. Nobody compliments your pipes. They only notice when shit leaks.
 import logging
 import os
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, List, Optional, overload
 
 from dotenv import load_dotenv
 
@@ -101,7 +101,24 @@ def _doppler_lookup(*candidate_keys: str) -> Optional[str]:
     return None
 
 
-def get_config(section: str, key: str, default: Any = None) -> Optional[str]:
+# Overloads so type checkers know a str default guarantees a str result —
+# callers doing int(get_config(..., default='20')) are provably safe.
+@overload
+def get_config(section: str, key: str, default: str) -> str:
+    """A str default guarantees a str result."""
+
+
+@overload
+def get_config(section: str, key: str, default: None = None) -> Optional[str]:
+    """No default: the value may be absent."""
+
+
+@overload
+def get_config(section: str, key: str, default: Any) -> Any:
+    """Any other default passes through unchanged."""
+
+
+def get_config(section: str, key: str, default: Any = None) -> Any:
     """
     Get a configuration value.
 

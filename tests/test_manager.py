@@ -107,7 +107,8 @@ def test_chain_is_tried_in_order(manager):
     """Second fallback covers when the first is also down."""
     first, second = FakeLLM(server_up=False), FakeLLM(server_up=True)
     first.provider_name, second.provider_name = 'first', 'second'
-    first.authenticate(); second.authenticate()
+    first.authenticate()
+    second.authenticate()
     first.enable_auto_reconnect = False
 
     manager.fallbacks = [first, second]
