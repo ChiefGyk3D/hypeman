@@ -9,6 +9,7 @@ your content on Bluesky, Mastodon, Discord, Matrix, and Threads.
 | [Boon-Tube-Daemon](https://github.com/ChiefGyk3D/Boon-Tube-Daemon) | you post a YouTube video or Short |
 | [stream-daemon](https://github.com/ChiefGyk3D/stream-daemon) | you go live on Twitch, YouTube, or Kick |
 | [Star-Daemon](https://github.com/ChiefGyk3D/Star-Daemon) | you star a GitHub repo |
+| [SolarStorm Scout](https://github.com/ChiefGyk3D/solarstorm_scout) | the Sun does something worth telling the HF bands about |
 
 ## Install
 

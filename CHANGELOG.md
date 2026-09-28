@@ -6,6 +6,41 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-09-28
+
+### Added
+- **Image attachments** on Bluesky and Mastodon: pass
+  `stream_data={'images': [{'data': b'...', 'alt': '...'}, ...]}` (or
+  `{'url': ..., 'alt': ...}` to have the picture fetched for you) and the
+  post carries them as pictures of their own, each with its own alt text —
+  as an images embed on Bluesky, as media attachments on Mastodon. Up to
+  four per post; a picture that cannot be resolved or uploaded is logged and
+  left out rather than blocking the text. The media type is sniffed from
+  the bytes, so a chart rendered in memory needs no naming. This is what
+  SolarStorm Scout needs for its D-RAP map, aurora oval and GOES X-ray
+  chart, and is distinct from `thumbnail_url`, which still drives link
+  cards for announcements about a URL.
+  `attached_images()` and `sniff_image_mime()` are exported from
+  `hypeman_social.social.base` for platforms that want the same rules.
+
+### Changed
+- **Mastodon no longer demands an OAuth client id/secret.** An access
+  token and the instance URL are enough, which is how Mastodon.py itself
+  works and how most bots are set up (Preferences → Development → copy the
+  token). A full client pair is still passed through when both are present;
+  a lone half of the pair is ignored with a warning.
+- **Doppler config reads are cached.** `get_config()` used to open a Doppler
+  client and fetch the whole project on every call — and `BaseLLM` alone
+  makes about twenty calls while being constructed — so a daemon with
+  Doppler enabled could trip the rate limit reading settings that never
+  change. Plain settings now read through the same once-per-process cache
+  as credentials (`reset_secret_cache()`, now exported from
+  `hypeman_social.config`, forces a re-read). One consequence: with
+  `DOPPLER_CONFIG` unset, settings and secrets now both default to the
+  `prd` config, where settings alone used to default to `dev`.
+- `hypeman_social.__version__` now matches the package version (it had
+  been left at 0.1.0).
+
 ## [0.2.0] — 2026-09-06
 
 ### Added
@@ -87,6 +122,7 @@ Star-Daemon, which carried three diverging copies of this code.
   hints — enforced by a bare-install CI job. Python 3.9–3.13. Published to
   PyPI via Trusted Publishing (OIDC) on GitHub release.
 
+[0.3.0]: https://github.com/ChiefGyk3D/hypeman/releases/tag/v0.3.0
 [0.2.0]: https://github.com/ChiefGyk3D/hypeman/releases/tag/v0.2.0
 [0.1.1]: https://github.com/ChiefGyk3D/hypeman/releases/tag/v0.1.1
 [0.1.0]: https://github.com/ChiefGyk3D/hypeman/releases/tag/v0.1.0

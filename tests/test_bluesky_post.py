@@ -57,6 +57,15 @@ class FakeModels:
         def ReplyRef(parent, root):
             return SimpleNamespace(parent=parent, root=root)
 
+    class AppBskyEmbedImages:
+        @staticmethod
+        def Main(images):
+            return SimpleNamespace(images=images)
+
+        @staticmethod
+        def Image(alt, image):
+            return SimpleNamespace(alt=alt, image=image)
+
     @staticmethod
     def create_strong_ref(post):
         return SimpleNamespace(uri=post.uri, cid=getattr(post, 'cid', 'cid'))
@@ -84,6 +93,8 @@ class FakeBskyClient:
         return SimpleNamespace(uri=f'at://post/{len(self.sent)}')
 
     def upload_blob(self, content):
+        if getattr(self, 'raise_on_upload', False):
+            raise RuntimeError('blob store down')
         return SimpleNamespace(blob=SimpleNamespace(size=len(content)))
 
 
@@ -166,3 +177,48 @@ class TestBlueskyPost:
         assert uri == 'at://post/1'
         sent_text = platform.client.sent[0]['text']
         assert bluesky_module._count_graphemes(sent_text) <= 300
+
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'chart-bytes'
+
+
+class TestBlueskyImages:
+    def test_images_become_an_images_embed_with_alt_text(self, platform):
+        uri = platform.post(
+            'X-ray flux, past 6 hours #SolarStormScout',
+            stream_data={'images': [{'data': PNG, 'alt': 'GOES X-ray flux chart'}]},
+        )
+        assert uri == 'at://post/1'
+        embed = platform.client.sent[0]['embed']
+        assert len(embed.images) == 1
+        assert embed.images[0].alt == 'GOES X-ray flux chart'
+        assert embed.images[0].image.size == len(PNG)
+
+    def test_images_win_over_link_card(self, platform):
+        platform.post(
+            'see https://kick.com/chief',
+            stream_data={'title': 't', 'images': [{'data': PNG, 'alt': 'a'}]},
+        )
+        embed = platform.client.sent[0]['embed']
+        assert hasattr(embed, 'images') and len(embed.images) == 1
+
+    def test_upload_failure_posts_text_only(self, platform):
+        platform.client.raise_on_upload = True
+        uri = platform.post('text only', stream_data={'images': [{'data': PNG, 'alt': 'a'}]})
+        assert uri == 'at://post/1'
+        assert platform.client.sent[0]['embed'] is None
+
+    def test_reply_keeps_images(self, platform):
+        parent = SimpleNamespace(
+            uri='at://post/parent', cid='c1', record=SimpleNamespace(reply=None),
+        )
+        platform.client.parent_posts = [parent]
+        platform.post('follow-up', reply_to_id='at://post/parent',
+                      stream_data={'images': [{'data': PNG, 'alt': 'map'}]})
+        sent = platform.client.sent[0]
+        assert sent['reply_to'].parent.uri == 'at://post/parent'
+        assert sent['embed'].images[0].alt == 'map'
+
+    def test_no_images_key_means_no_embed(self, platform):
+        platform.post('plain', stream_data={'title': 't'})
+        assert platform.client.sent[0]['embed'] is None

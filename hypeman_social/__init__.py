@@ -7,20 +7,21 @@ hypeman — the shared core behind ChiefGyk3D's announcement daemons.
 
 A hype man's entire job is announcing you loudly to a crowd. That's what these
 daemons do: Boon-Tube-Daemon shouts when you post a video, stream-daemon shouts
-when you go live, Star-Daemon shouts when you star a repo. They were three
-copies of the same code, drifting apart, and a bug fixed in one never reached
-the others. Now they share this.
+when you go live, Star-Daemon shouts when you star a repo, SolarStorm Scout
+shouts when the Sun changes the HF bands. They were separate copies of the
+same code, drifting apart, and a bug fixed in one never reached the others.
+Now they share this.
 
 What's in here:
 
     hypeman_social.config          Config and secrets (env, .env, AWS, Vault, Doppler)
     hypeman_social.llm             Ollama + Gemini, guardrails, automatic failover
-    hypeman_social.social          Bluesky, Mastodon, Discord, Matrix
+    hypeman_social.social          Bluesky, Mastodon, Discord, Matrix, Threads
     hypeman_social.observability   Logging with rotation, health endpoints
 
 Nothing in here knows what you're announcing. That's the caller's business.
 """
 
-__version__ = '0.1.0'
+__version__ = '0.3.0'
 
 __all__ = ['__version__']

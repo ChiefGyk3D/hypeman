@@ -92,3 +92,37 @@ class TestGetUsernames:
         assert get_usernames('Kick') == []
         assert get_usernames('Kick', default='solo') == ['solo']
         assert get_usernames('Kick', default=['x', 'y']) == ['x', 'y']
+
+
+class TestDopplerConfigLookup:
+    """get_config reads Doppler through the process-wide secret cache."""
+
+    @pytest.fixture(autouse=True)
+    def doppler_on(self, monkeypatch):
+        from hypeman_social.config import secrets
+
+        monkeypatch.setenv('DOPPLER_TOKEN', 'dp.st.test')
+        monkeypatch.setattr(secrets, '_doppler_cache', {
+            'SETTINGS_CHECK_INTERVAL': '45',
+            'LLM_MODEL': 'YOUR_MODEL_HERE',
+        })
+        monkeypatch.delenv('CHECK_INTERVAL', raising=False)
+        monkeypatch.delenv('SETTINGS_CHECK_INTERVAL', raising=False)
+
+    def test_doppler_value_wins_over_env(self, monkeypatch):
+        monkeypatch.setenv('CHECK_INTERVAL', '5')
+        assert get_config('Settings', 'check_interval') == '45'
+
+    def test_cache_is_used_without_touching_the_sdk(self, monkeypatch):
+        import sys
+
+        # No dopplersdk import may happen: the cache already holds the answer.
+        monkeypatch.setitem(sys.modules, 'dopplersdk', None)
+        assert get_config('Settings', 'check_interval') == '45'
+
+    def test_placeholder_falls_through(self, monkeypatch):
+        monkeypatch.setenv('LLM_MODEL', 'gemma3:4b')
+        assert get_config('LLM', 'model') == 'gemma3:4b'
+
+    def test_missing_key_falls_through_to_default(self):
+        assert get_config('Settings', 'nothing_here', default='dflt') == 'dflt'

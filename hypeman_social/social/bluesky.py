@@ -12,7 +12,12 @@ from typing import Optional
 from urllib.parse import urlparse
 
 from hypeman_social.config import get_bool_config, get_config
-from hypeman_social.social.base import SocialPlatform, is_url_for_domain, platform_secret
+from hypeman_social.social.base import (
+    SocialPlatform,
+    attached_images,
+    is_url_for_domain,
+    platform_secret,
+)
 
 # atproto is the 'bluesky' extra. Importing this module without it must not
 # raise — the daemon may only have the extras for the networks it uses.
@@ -132,6 +137,37 @@ class BlueskyPlatform(SocialPlatform):
         
         return result
     
+    def _build_images_embed(self, stream_data: Optional[dict]):
+        """
+        Upload ``stream_data['images']`` and wrap them in an images embed.
+
+        Returns None when there is nothing to attach or every upload failed;
+        a picture that will not upload is logged and left out rather than
+        blocking the text. Alt text goes through as given — an empty string
+        is still valid, but callers should describe what the picture shows.
+        """
+        images = attached_images(stream_data)
+        if not images:
+            return None
+
+        uploaded = []
+        for index, image in enumerate(images):
+            try:
+                upload = self.client.upload_blob(image['data'])
+                blob = upload.blob if hasattr(upload, 'blob') else None
+                if blob is None:
+                    raise ValueError('upload_blob returned no blob')
+                uploaded.append(models.AppBskyEmbedImages.Image(alt=image['alt'], image=blob))
+                logger.debug(f"Uploaded image {index + 1}/{len(images)} to Bluesky")
+            except Exception as e:
+                logger.warning(
+                    f"⚠ Could not upload image {index + 1} to Bluesky: {type(e).__name__}: {e}"
+                )
+
+        if not uploaded:
+            return None
+        return models.AppBskyEmbedImages.Main(images=uploaded)
+
     def post(self, message: str, reply_to_id: Optional[str] = None, platform_name: Optional[str] = None, stream_data: Optional[dict] = None) -> Optional[str]:
         if not self.enabled or not self.client:
             return None
@@ -380,7 +416,15 @@ class BlueskyPlatform(SocialPlatform):
                 except Exception as embed_error:
                     logger.warning(f"⚠ Could not create embed card: {embed_error}")
                     embed = None
-            
+
+            # Pictures that are the post's own content (a rendered chart, a
+            # downloaded map). A post can carry either an images embed or a
+            # link card, not both, and when the caller went to the trouble of
+            # attaching pictures those are what they want seen.
+            images_embed = self._build_images_embed(stream_data)
+            if images_embed is not None:
+                embed = images_embed
+
             # Final safety check: verify built text fits within limit
             built_text = text_builder.build_text()
             built_graphemes = _count_graphemes(built_text)
