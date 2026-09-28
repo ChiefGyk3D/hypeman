@@ -62,15 +62,15 @@ class MastodonPlatform(SocialPlatform):
             logger.warning(f"✗ Mastodon missing credentials: {', '.join(missing)}")
             return False
 
+        use_client_pair = bool(client_id) and bool(client_secret)
         if bool(client_id) != bool(client_secret):
             logger.warning(
                 "⚠ Mastodon has only one of client_id/client_secret set; "
                 "ignoring it and authenticating with the access token alone"
             )
-            client_id = client_secret = None
 
         try:
-            if client_id and client_secret:
+            if use_client_pair:
                 self.client = Mastodon(
                     client_id=client_id,
                     client_secret=client_secret,

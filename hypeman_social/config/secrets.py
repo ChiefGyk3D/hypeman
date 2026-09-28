@@ -43,9 +43,16 @@ def reset_secret_cache() -> None:
         _doppler_cache = None
 
 
-def _doppler_secrets() -> Dict[str, Any]:
+def _doppler_project_values() -> Dict[str, Any]:
     """
-    Every secret in the configured Doppler project, fetched once per process.
+    Every value in the configured Doppler project, fetched once per process.
+
+    Doppler holds settings and credentials side by side, so this one fetch
+    serves both: get_secret() reads credentials from it through
+    _doppler_secrets(), and get_config() reads plain settings from it
+    directly. Keeping the two entry points apart also keeps a setting such
+    as a model name or a hostname from being classed, and handled, as a
+    secret just because it travelled in the same response.
 
     Returns an empty dict — and caches that — when Doppler is unreachable, so a
     rate limit or outage degrades to environment variables instead of stalling
@@ -88,6 +95,9 @@ def _doppler_secrets() -> Dict[str, Any]:
         return _doppler_cache
 
 
+def _doppler_secrets() -> Dict[str, Any]:
+    """The credentials view of the Doppler project: the same cached fetch."""
+    return _doppler_project_values()
 
 
 def _usable(value: Any) -> bool:

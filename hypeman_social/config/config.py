@@ -82,14 +82,14 @@ def _doppler_lookup(*candidate_keys: str) -> Optional[str]:
         return None
 
     try:
-        from hypeman_social.config.secrets import _doppler_secrets
+        from hypeman_social.config.secrets import _doppler_project_values
 
-        secrets = _doppler_secrets()
-        if not secrets:
+        values = _doppler_project_values()
+        if not values:
             return None
 
         for candidate in candidate_keys:
-            value = secrets.get(candidate)
+            value = values.get(candidate)
             if value and not _is_placeholder(value):
                 logger.debug(f"✓ Retrieved {candidate} from Doppler")
                 return value
