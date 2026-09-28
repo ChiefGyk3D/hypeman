@@ -13,9 +13,12 @@ from hypeman_social.social import REGISTRY
 from hypeman_social.social.base import (
     EVENT_LIVE,
     EVENT_UPLOAD,
+    MAX_IMAGES_PER_POST,
     SocialPlatform,
+    attached_images,
     event_kind,
     is_url_for_domain,
+    sniff_image_mime,
 )
 from hypeman_social.social.bluesky import BlueskyPlatform, _count_graphemes
 from hypeman_social.social.discord import DiscordPlatform
@@ -358,8 +361,14 @@ class FakeMastodonClient:
         self.statuses.append((message, in_reply_to_id, media_ids))
         return {'id': 12345}
 
-    def media_post(self, path, description=None):
-        return {'id': 'media-1'}
+    def media_post(self, media_file, mime_type=None, description=None):
+        uploads = getattr(self, 'uploads', None)
+        if uploads is None:
+            uploads = self.uploads = []
+        if getattr(self, 'raise_on_media', False):
+            raise RuntimeError('media store down')
+        uploads.append((media_file, mime_type, description))
+        return {'id': f'media-{len(uploads)}'}
 
 
 @pytest.fixture
@@ -414,6 +423,124 @@ class TestMastodon:
 
     def test_post_before_auth_returns_none(self, mastodon_env):
         assert MastodonPlatform().post('hello') is None
+
+    def test_access_token_alone_is_enough(self, mastodon_env, monkeypatch):
+        monkeypatch.delenv('MASTODON_CLIENT_ID', raising=False)
+        monkeypatch.delenv('MASTODON_CLIENT_SECRET', raising=False)
+        platform = MastodonPlatform()
+        assert platform.authenticate() is True
+        assert 'client_id' not in platform.client.kwargs
+        assert platform.client.kwargs['access_token'] == 'tok'
+
+    def test_half_client_pair_is_ignored(self, mastodon_env, monkeypatch):
+        monkeypatch.delenv('MASTODON_CLIENT_SECRET', raising=False)
+        platform = MastodonPlatform()
+        assert platform.authenticate() is True
+        assert 'client_id' not in platform.client.kwargs
+
+    def test_full_client_pair_still_used(self, mastodon_env):
+        platform = MastodonPlatform()
+        assert platform.authenticate() is True
+        assert platform.client.kwargs['client_id'] == 'cid'
+        assert platform.client.kwargs['client_secret'] == 'csec'
+
+    def test_images_uploaded_from_bytes_with_alt_text(self, mastodon_env):
+        platform = MastodonPlatform()
+        platform.authenticate()
+        png = b'\x89PNG\r\n\x1a\nchart'
+
+        result = platform.post(
+            'X-ray flux', reply_to_id='7',
+            stream_data={'images': [{'data': png, 'alt': 'GOES X-ray flux chart'}]},
+        )
+        assert result == '12345'
+        assert platform.client.uploads == [(png, 'image/png', 'GOES X-ray flux chart')]
+        assert platform.client.statuses[0] == ('X-ray flux', '7', ['media-1'])
+
+    def test_image_upload_failure_still_posts(self, mastodon_env):
+        platform = MastodonPlatform()
+        platform.authenticate()
+        platform.client.raise_on_media = True
+
+        result = platform.post('text', stream_data={'images': [{'data': b'\xff\xd8\xffjpg', 'alt': ''}]})
+        assert result == '12345'
+        assert platform.client.statuses[0][2] is None
+
+
+# ─────────────────────────────────────────────────────────────────────────
+# Image attachments (shared resolver in base.py)
+# ─────────────────────────────────────────────────────────────────────────
+
+PNG = b'\x89PNG\r\n\x1a\n' + b'png-body'
+JPEG = b'\xff\xd8\xff' + b'jpeg-body'
+
+
+class TestSniffImageMime:
+    def test_known_signatures(self):
+        assert sniff_image_mime(PNG) == 'image/png'
+        assert sniff_image_mime(JPEG) == 'image/jpeg'
+        assert sniff_image_mime(b'GIF89a...') == 'image/gif'
+        assert sniff_image_mime(b'RIFF\x00\x00\x00\x00WEBPVP8 ') == 'image/webp'
+
+    def test_unknown_gets_fallback(self):
+        assert sniff_image_mime(b'not an image') == 'image/png'
+        assert sniff_image_mime(b'not an image', fallback='image/jpeg') == 'image/jpeg'
+
+
+class TestAttachedImages:
+    def test_none_and_missing_key(self):
+        assert attached_images(None) == []
+        assert attached_images({}) == []
+        assert attached_images({'thumbnail_url': 'https://x/y.jpg'}) == []
+
+    def test_bytes_entry_gets_sniffed_mime_and_alt(self):
+        [image] = attached_images({'images': [{'data': JPEG, 'alt': 'a map'}]})
+        assert image == {'data': JPEG, 'alt': 'a map', 'mime_type': 'image/jpeg'}
+
+    def test_explicit_mime_type_wins(self):
+        [image] = attached_images({'images': [{'data': b'???', 'mime_type': 'image/svg+xml'}]})
+        assert image['mime_type'] == 'image/svg+xml'
+        assert image['alt'] == ''
+
+    def test_url_entry_is_downloaded(self, monkeypatch):
+        response = FakeResponse(200)
+        response.content = PNG
+        response.headers = {'content-type': 'image/png; charset=binary'}
+        seen = []
+
+        def fake_get(url, **kwargs):
+            seen.append(url)
+            return response
+
+        monkeypatch.setattr('requests.get', fake_get)
+        [image] = attached_images({'images': [{'url': 'https://noaa.example/latest.png', 'alt': 'x'}]})
+        assert seen == ['https://noaa.example/latest.png']
+        assert image['data'] == PNG
+        assert image['mime_type'] == 'image/png'
+
+    def test_failed_download_is_dropped_not_raised(self, monkeypatch):
+        def explode(*a, **k):
+            raise RuntimeError('cdn down')
+
+        monkeypatch.setattr('requests.get', explode)
+        assert attached_images({'images': [{'url': 'https://x/y.png'}]}) == []
+
+        monkeypatch.setattr('requests.get', lambda *a, **k: FakeResponse(503))
+        assert attached_images({'images': [{'url': 'https://x/y.png'}]}) == []
+
+    def test_garbage_entries_are_dropped(self):
+        resolved = attached_images({'images': [None, 'string', {'alt': 'no data'},
+                                                {'data': 'not bytes'}, {'data': PNG}]})
+        assert len(resolved) == 1
+
+    def test_not_a_list_is_ignored(self):
+        assert attached_images({'images': {'data': PNG}}) == []
+
+    def test_capped_at_platform_maximum(self):
+        entries = [{'data': PNG, 'alt': str(i)} for i in range(MAX_IMAGES_PER_POST + 2)]
+        resolved = attached_images({'images': entries})
+        assert len(resolved) == MAX_IMAGES_PER_POST
+        assert [image['alt'] for image in resolved] == ['0', '1', '2', '3']
 
 
 # ─────────────────────────────────────────────────────────────────────────

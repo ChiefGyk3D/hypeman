@@ -69,32 +69,30 @@ def _doppler_lookup(*candidate_keys: str) -> Optional[str]:
 
     Returns None if Doppler isn't configured, isn't installed, or has no match.
     Never raises — Doppler being down should degrade to env vars, not crash the daemon.
+
+    Reads go through the process-wide cache in hypeman_social.config.secrets.
+    Before that, every get_config() call opened a client and fetched the whole
+    project — and BaseLLM alone makes about twenty such calls while it is
+    being constructed, so a daemon polling with Doppler enabled could trip the
+    rate limit on config reads that never change. One fetch per process now
+    serves both plain settings and credentials; reset_secret_cache() forces
+    a re-read.
     """
     if not os.getenv('DOPPLER_TOKEN'):
         return None
 
     try:
-        from dopplersdk import DopplerSDK
+        from hypeman_social.config.secrets import _doppler_project_values
 
-        sdk = DopplerSDK(access_token=os.getenv('DOPPLER_TOKEN'))
-        response = sdk.secrets.list(
-            project=os.getenv('DOPPLER_PROJECT'),
-            config=os.getenv('DOPPLER_CONFIG', 'dev'),
-        )
-
-        secrets = getattr(response, 'secrets', None)
-        if not secrets:
+        values = _doppler_project_values()
+        if not values:
             return None
 
         for candidate in candidate_keys:
-            if candidate in secrets:
-                entry = secrets[candidate]
-                value = entry.get('computed', entry.get('raw', ''))
-                if value and not _is_placeholder(value):
-                    logger.debug(f"✓ Retrieved {candidate} from Doppler")
-                    return value
-    except ImportError:
-        logger.debug("dopplersdk not installed, skipping Doppler lookup")
+            value = values.get(candidate)
+            if value and not _is_placeholder(value):
+                logger.debug(f"✓ Retrieved {candidate} from Doppler")
+                return value
     except Exception as e:
         logger.debug(f"Doppler lookup failed: {type(e).__name__}")
 

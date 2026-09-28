@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from hypeman_social.config import get_bool_config, get_config
-from hypeman_social.social.base import SocialPlatform, platform_secret
+from hypeman_social.social.base import SocialPlatform, attached_images, platform_secret
 
 # Mastodon.py is the 'mastodon' extra. Importing this module without it must
 # not raise — the daemon may only have the extras for the networks it uses.
@@ -47,27 +47,41 @@ class MastodonPlatform(SocialPlatform):
         client_secret = platform_secret('Mastodon', 'client_secret')
         access_token = platform_secret('Mastodon', 'access_token')
         api_base_url = get_config('Mastodon', 'api_base_url')
-        
-        if not all([client_id, client_secret, access_token, api_base_url]):
+
+        # An access token is all Mastodon.py needs to post. The OAuth client
+        # id/secret pair only matters for token refresh flows, so a bot that
+        # pasted a token from Preferences → Development should not be turned
+        # away for leaving them blank. Both or neither: a lone half-pair is
+        # a configuration mistake worth pointing out.
+        if not all([access_token, api_base_url]):
             missing = []
-            if not client_id:
-                missing.append('client_id')
-            if not client_secret:
-                missing.append('client_secret')
             if not access_token:
                 missing.append('access_token')
             if not api_base_url:
                 missing.append('api_base_url')
             logger.warning(f"✗ Mastodon missing credentials: {', '.join(missing)}")
             return False
-            
-        try:
-            self.client = Mastodon(
-                client_id=client_id,
-                client_secret=client_secret,
-                access_token=access_token,
-                api_base_url=api_base_url
+
+        use_client_pair = bool(client_id) and bool(client_secret)
+        if bool(client_id) != bool(client_secret):
+            logger.warning(
+                "⚠ Mastodon has only one of client_id/client_secret set; "
+                "ignoring it and authenticating with the access token alone"
             )
+
+        try:
+            if use_client_pair:
+                self.client = Mastodon(
+                    client_id=client_id,
+                    client_secret=client_secret,
+                    access_token=access_token,
+                    api_base_url=api_base_url
+                )
+            else:
+                self.client = Mastodon(
+                    access_token=access_token,
+                    api_base_url=api_base_url
+                )
             self.enabled = True
             self.authenticated = True
             logger.info("✓ Mastodon authenticated")
@@ -178,7 +192,25 @@ class MastodonPlatform(SocialPlatform):
                                 os.unlink(tmp_path)
                     except Exception as img_error:
                         logger.warning(f"⚠ Could not upload thumbnail to Mastodon: {img_error}")
-            
+
+            # Pictures that are the post's own content (a rendered chart, a
+            # downloaded map), each with its own alt text. Mastodon.py takes
+            # raw bytes when told the media type, so nothing touches disk.
+            for index, image in enumerate(attached_images(stream_data)):
+                try:
+                    media = self.client.media_post(
+                        image['data'],
+                        mime_type=image['mime_type'],
+                        description=image['alt'] or None,
+                    )
+                    media_ids.append(media['id'])
+                    logger.debug(f"Uploaded image {index + 1} to Mastodon (media ID: {media['id']})")
+                except Exception as img_error:
+                    logger.warning(
+                        f"⚠ Could not upload image {index + 1} to Mastodon: "
+                        f"{type(img_error).__name__}: {img_error}"
+                    )
+
             # Post as a reply if reply_to_id is provided (threading)
             status = self.client.status_post(
                 message, 

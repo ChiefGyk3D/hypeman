@@ -17,6 +17,7 @@ from hypeman_social.config.secrets import (
     load_secrets_from_aws,
     load_secrets_from_doppler,
     load_secrets_from_vault,
+    reset_secret_cache,
 )
 
 __all__ = [
@@ -30,4 +31,5 @@ __all__ = [
     'load_secrets_from_aws',
     'load_secrets_from_vault',
     'load_secrets_from_doppler',
+    'reset_secret_cache',
 ]

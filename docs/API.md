@@ -105,6 +105,7 @@ Free-form dict; recognized keys:
 | `title` | Embed titles/descriptions |
 | `url` | Not needed — the first URL in the message text is used |
 | `thumbnail_url` | Embed image (Discord), media upload (Mastodon), link-card thumb (Bluesky) |
+| `images` | Pictures that *are* the post's content, each with alt text: `[{'data': bytes, 'alt': str}, ...]` or `{'url': ..., 'alt': ...}` to have it fetched. Bluesky attaches them as an images embed (replacing any link card), Mastodon as media attachments. Up to four; unresolvable entries are dropped, never raised. Media type is sniffed from the bytes unless `mime_type` is given. See `attached_images()` below |
 | `viewer_count` | Live embeds; also marks content as live for Bluesky cards |
 | `game_name` | Category field |
 | `is_live` | Live vs video for Bluesky card copy |
@@ -119,6 +120,12 @@ Free-form dict; recognized keys:
   this doesn't.
 - `platform_secret(platform, key, default=None)` — `get_secret` with the
   conventional `SECRETS_*_<PLATFORM>_*` env names filled in.
+- `attached_images(stream_data) -> list[dict]` — resolve `stream_data['images']`
+  into `{data, alt, mime_type}` dicts ready to upload: downloads `url` entries,
+  sniffs media types, drops anything unusable, caps at `MAX_IMAGES_PER_POST`.
+  Platforms share it so a picture that will not load fails the same way
+  everywhere: logged and left out.
+- `sniff_image_mime(data, fallback='image/png')` — PNG/JPEG/GIF/WebP by magic number.
 
 ## `hypeman_social.llm`
 

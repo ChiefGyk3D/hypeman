@@ -27,7 +27,9 @@ Priority, first match wins:
 
 1. **Doppler** — if `DOPPLER_TOKEN` is set, the sectioned key
    (`SETTINGS_CHECK_INTERVAL`) then the simple key (`CHECK_INTERVAL`) are
-   looked up in the Doppler project/config.
+   looked up in the Doppler project/config. The project is fetched once per
+   process and shared with the secret lookups below; `reset_secret_cache()`
+   forces a re-read.
 2. **Simple env key** — `CHECK_INTERVAL`
 3. **Sectioned env key** — `SETTINGS_CHECK_INTERVAL`
 4. The default passed by the caller.
@@ -66,7 +68,7 @@ All optional. With none configured, everything reads from env / `.env`.
 |---|---|---|
 | `DOPPLER_TOKEN` | Doppler service token; presence enables Doppler | — |
 | `DOPPLER_PROJECT` | Doppler project | — |
-| `DOPPLER_CONFIG` | Doppler config | `dev` (config lookups) / `prd` (secret bundles) |
+| `DOPPLER_CONFIG` | Doppler config | `prd` |
 | `SECRETS_MANAGER` | `aws`, `vault`, or `none` | `none` |
 | `SECRETS_VAULT_URL` | Vault server URL | — |
 | `SECRETS_VAULT_TOKEN` | Vault token | — |
@@ -189,7 +191,9 @@ Install extra: `hypeman-social[bluesky]`.
 Behavior: 300-grapheme limit enforced with real grapheme counting (ZWJ emoji
 count as one), URLs become link facets, `#hashtags` become tag facets, link
 cards are built from stream metadata or an Open Graph scrape, replies thread
-under the root post.
+under the root post. `stream_data['images']` attaches up to four pictures
+with alt text as an images embed (which replaces the link card — Bluesky
+allows one embed per post).
 
 ## Social: Mastodon
 
@@ -199,12 +203,14 @@ Install extra: `hypeman-social[mastodon]`.
 |---|---|---|
 | `MASTODON_ENABLE_POSTING` | Enable the platform | `false` |
 | `MASTODON_API_BASE_URL` | Your instance, e.g. `https://infosec.exchange` | — |
-| `MASTODON_CLIENT_ID` | OAuth client id (secret chain) | — |
-| `MASTODON_CLIENT_SECRET` | OAuth client secret (secret chain) | — |
-| `MASTODON_ACCESS_TOKEN` | Access token (secret chain) | — |
+| `MASTODON_ACCESS_TOKEN` | Access token (secret chain) — Preferences → Development → New Application, scopes `read`, `write:statuses`, `write:media` | — |
+| `MASTODON_CLIENT_ID` | OAuth client id (secret chain). Optional; only useful together with the secret | — |
+| `MASTODON_CLIENT_SECRET` | OAuth client secret (secret chain). Optional | — |
 
-Behavior: replies thread, thumbnails upload as media attachments with alt
-text; a failed thumbnail never blocks the post.
+Behavior: replies thread; thumbnails and `images` upload as media
+attachments with alt text; a failed upload never blocks the post. The
+access token alone is enough to post — the client id/secret pair is passed
+through when both are set and ignored (with a warning) when only one is.
 
 ## Social: Discord
 
