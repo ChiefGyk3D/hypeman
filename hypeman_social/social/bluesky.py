@@ -82,8 +82,14 @@ class BlueskyPlatform(SocialPlatform):
             logger.info("✓ Bluesky authenticated")
             return True
         except Exception as e:
-            # Only log handle on authentication failure to help debug credential issues
-            logger.warning(f"✗ Bluesky authentication failed for handle '{handle}': {type(e).__name__}: {e}")
+            # Only the exception type is logged. atproto's login() can echo
+            # request/response details back in its message, which risks
+            # leaking app_password into the log, and CodeQL traces the handle
+            # through the same credential lookup, so neither is printed.
+            logger.warning(
+                f"✗ Bluesky authentication failed for the configured BLUESKY_HANDLE: "
+                f"{type(e).__name__}"
+            )
             return False
     
     @staticmethod

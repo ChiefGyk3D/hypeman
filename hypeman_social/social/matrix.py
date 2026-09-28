@@ -224,7 +224,11 @@ class MatrixPlatform(SocialPlatform):
                 logger.info("✓ Matrix message posted")
                 return event_id
             else:
-                logger.warning(f"⚠ Matrix post failed with status {response.status_code}: {response.text}")
+                # Response body is not logged — a homeserver error page can
+                # echo back request context, and the request carried
+                # self.access_token in its Authorization header. Matches the
+                # status-only pattern already used in discord.py.
+                logger.warning(f"⚠ Matrix post failed with status {response.status_code}")
             return None
         except Exception as e:
             logger.error(f"✗ Matrix post failed: {type(e).__name__}: {e}")

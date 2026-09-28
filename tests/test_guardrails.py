@@ -276,3 +276,24 @@ def test_star_profile_allows_an_honest_description():
         "Starred a neat little tool for wrangling Kubernetes secrets",
         0, "kubesec", "chiefgyk3d", STAR_PROFILE)
     assert valid is True, issues
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Emoji detection
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_count_emojis_does_not_cross_the_utf16_surrogate_range():
+    """
+    The 'enclosed characters' range in the emoji pattern used to run
+    \\U000024C2-\\U0001F251 in one piece, which crosses straight through the
+    UTF-16 surrogate block (U+D800-U+DFFF) — code points that are not valid
+    standalone Unicode scalar values. CodeQL (py/overly-large-range) flagged
+    it as suspicious; the fix splits the range around the gap. This pins
+    that the pattern still compiles and still counts real emoji correctly.
+    """
+    assert guardrails.count_emojis("no emoji here") == 0
+    assert guardrails.count_emojis("so hyped \U0001F600") == 1
+    # An "enclosed characters" example from well below the surrogate gap.
+    assert guardrails.count_emojis("circled M \U000024C2") == 1
+    # And one from well above it.
+    assert guardrails.count_emojis("squared cjk \U0001F250") == 1
