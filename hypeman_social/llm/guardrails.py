@@ -151,7 +151,16 @@ def count_emojis(message: str) -> int:
         "\U0001F680-\U0001F6FF"  # transport & map symbols
         "\U0001F1E0-\U0001F1FF"  # flags (iOS)
         "\U00002702-\U000027B0"  # dingbats
-        "\U000024C2-\U0001F251"  # enclosed characters
+        # Enclosed characters, split around the UTF-16 surrogate range
+        # (U+D800-U+DFFF). The original single range here crossed straight
+        # through it, which CodeQL flags as an overly-large/suspicious range:
+        # those code points are not valid standalone Unicode scalar values,
+        # so including them is meaningless at best and, on interpreters that
+        # reject lone surrogates in a compiled pattern, a crash at best.
+        # Splitting preserves every real character the range was meant to
+        # catch while excluding the invalid gap.
+        "\U000024C2-\U0000D7FF"
+        "\U0000E000-\U0001F251"
         "]", flags=re.UNICODE
     )
     return len(emoji_pattern.findall(message))

@@ -77,8 +77,11 @@ class BlueskyPlatform(SocialPlatform):
             logger.info("✓ Bluesky authenticated")
             return True
         except Exception as e:
-            # Only log handle on authentication failure to help debug credential issues
-            logger.warning(f"✗ Bluesky authentication failed for handle '{handle}': {type(e).__name__}: {e}")
+            # Only log handle and exception type on authentication failure —
+            # the exception text itself is not logged because atproto's
+            # login() can echo request/response details back in its message,
+            # which risks leaking app_password into the log.
+            logger.warning(f"✗ Bluesky authentication failed for handle '{handle}': {type(e).__name__}")
             return False
     
     @staticmethod

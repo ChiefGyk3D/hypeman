@@ -73,7 +73,10 @@ class MastodonPlatform(SocialPlatform):
             logger.info("✓ Mastodon authenticated")
             return True
         except Exception as e:
-            logger.warning(f"✗ Mastodon authentication failed for {api_base_url}: {type(e).__name__}: {e}")
+            # Exception text is not logged — the Mastodon.py client can
+            # include request/response details in its error message, which
+            # risks leaking client_secret or access_token into the log.
+            logger.warning(f"✗ Mastodon authentication failed for {api_base_url}: {type(e).__name__}")
             return False
     
     @staticmethod
