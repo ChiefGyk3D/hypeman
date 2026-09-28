@@ -12,12 +12,30 @@ the network calls it a "toot" — is the platform's own business.
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from hypeman_social.config import get_secret
 
 logger = logging.getLogger(__name__)
+
+#: Most images one post may carry. Bluesky and Mastodon both stop at four;
+#: anything past that is dropped with a warning rather than failing the post.
+MAX_IMAGES_PER_POST = 4
+
+#: Image formats recognised by magic number, so a caller handing over raw
+#: bytes (a chart rendered in memory) never has to name the type itself.
+_IMAGE_SIGNATURES = (
+    (b'\x89PNG\r\n\x1a\n', 'image/png'),
+    (b'\xff\xd8\xff', 'image/jpeg'),
+    (b'GIF87a', 'image/gif'),
+    (b'GIF89a', 'image/gif'),
+)
+
+_BROWSER_USER_AGENT = (
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+    '(KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36'
+)
 
 
 #: What kind of thing is being announced. Platforms use this to pick embed
@@ -60,6 +78,103 @@ def platform_secret(platform: str, key: str, default: Optional[str] = None) -> O
         secret_path_env=f'SECRETS_VAULT_{upper}_SECRET_PATH',
         doppler_secret_env=f'SECRETS_DOPPLER_{upper}_SECRET_NAME',
     )
+
+
+def sniff_image_mime(data: bytes, fallback: str = 'image/png') -> str:
+    """
+    Work out an image's media type from its first bytes.
+
+    WebP is RIFF-framed, so it needs a second look past the container header;
+    everything else is a plain prefix match. Unknown data gets the fallback.
+    """
+    for signature, mime in _IMAGE_SIGNATURES:
+        if data.startswith(signature):
+            return mime
+    if data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return fallback
+
+
+def attached_images(stream_data: Optional[dict]) -> List[Dict[str, Any]]:
+    """
+    Resolve ``stream_data['images']`` into ready-to-upload attachments.
+
+    Each entry describes one picture, either as bytes the caller already has
+    (``{'data': b'...', 'alt': 'GOES X-ray flux, past 6 hours'}``) or as a URL
+    to fetch (``{'url': 'https://...', 'alt': '...'}``). An optional
+    ``mime_type`` overrides detection. The result is a list of dicts with
+    ``data``, ``alt`` and ``mime_type`` filled in, in the order given.
+
+    The download lives here so Bluesky and Mastodon share one code path and
+    one set of failure rules: an entry that cannot be resolved is logged and
+    dropped, never raised, because a missing picture must not cost the post.
+    Anything past MAX_IMAGES_PER_POST is dropped the same way.
+
+    This is separate from ``thumbnail_url``, which drives link cards and
+    embed thumbnails for an announcement about a URL. ``images`` is for posts
+    whose pictures *are* the content: a rendered chart, a downloaded map.
+    """
+    if not stream_data:
+        return []
+
+    entries = stream_data.get('images') or []
+    if not isinstance(entries, (list, tuple)):
+        logger.warning("⚠ stream_data['images'] must be a list; ignoring it")
+        return []
+
+    resolved: List[Dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if len(resolved) >= MAX_IMAGES_PER_POST:
+            logger.warning(
+                f"⚠ Post carries more than {MAX_IMAGES_PER_POST} images; dropping the rest"
+            )
+            break
+
+        if not isinstance(entry, dict):
+            logger.warning(f"⚠ Image {index + 1} is not a dict; skipping")
+            continue
+
+        data = entry.get('data')
+        url = entry.get('url')
+        mime_type = entry.get('mime_type')
+
+        if not data and url:
+            try:
+                import requests
+
+                response = requests.get(
+                    url, headers={'User-Agent': _BROWSER_USER_AGENT}, timeout=15)
+                if response.status_code == 200 and response.content:
+                    data = response.content
+                    if not mime_type:
+                        header = response.headers.get('content-type', '').split(';')[0]
+                        mime_type = header.strip() or None
+                else:
+                    logger.warning(
+                        f"⚠ Image {index + 1} download returned {response.status_code}; skipping"
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"⚠ Image {index + 1} download failed: {type(e).__name__}: {e}"
+                )
+
+        if not data:
+            logger.warning(f"⚠ Image {index + 1} has no data; skipping")
+            continue
+
+        if not isinstance(data, (bytes, bytearray)):
+            logger.warning(f"⚠ Image {index + 1} data is not bytes; skipping")
+            continue
+
+        data = bytes(data)
+        mime_type = mime_type or sniff_image_mime(data)
+        resolved.append({
+            'data': data,
+            'alt': str(entry.get('alt') or ''),
+            'mime_type': mime_type,
+        })
+
+    return resolved
 
 
 def is_url_for_domain(url: str, domain: str) -> bool:
@@ -139,7 +254,9 @@ class SocialPlatform(ABC):
             message: The text to post.
             reply_to_id: ID of a previous post to thread under, if any.
             platform_name: Source platform the announcement is about.
-            stream_data: Extra context — title, url, thumbnail, event_kind.
+            stream_data: Extra context — title, url, thumbnail, event_kind,
+                and ``images`` (see attached_images) for posts that carry
+                pictures of their own.
 
         Returns:
             The new post's ID (for threading), or None on failure.

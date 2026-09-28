@@ -30,7 +30,8 @@ _PLACEHOLDER_PREFIX = 'YOUR_'
 # surfaces as "missing credentials" rather than "too many requests", which is a
 # genuinely confusing way to lose an afternoon.
 #
-# One fetch per process. Call reset_secret_cache() to force a re-read.
+# One fetch per process, shared with the plain-config lookup in config.py.
+# Call reset_secret_cache() to force a re-read.
 _doppler_cache: Optional[Dict[str, str]] = None
 _doppler_cache_lock = threading.Lock()
 
