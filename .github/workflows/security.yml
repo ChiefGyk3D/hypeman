@@ -1,0 +1,34 @@
+# CodeQL (Python and the workflows themselves), gitleaks, Semgrep, dependency
+# review on pull requests, and OpenSSF Scorecard on main. The jobs live in
+# ChiefGyk3D/git-your-ship-together.
+name: Security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, so new advisories and queries reach unchanged code.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  security:
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@0e58a0e61ea8b3800d1cb0e6ed81bb860ace2094 # v1.6.3
+    permissions:
+      contents: read
+      security-events: write
+      pull-requests: write
+      id-token: write   # Scorecard publishing
+    with:
+      codeql-queries: security-and-quality
+      scorecard: true
+      # The core dependencies are floors in pyproject.toml, not a pinned
+      # requirements file, so pip-audit has nothing to read; dependency review
+      # covers what a pull request adds.
+      pip-audit-requirements: ""
+      egress-policy: block
