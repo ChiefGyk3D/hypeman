@@ -1,18 +1,21 @@
-# Keeps the pinned GitHub Actions SHAs and Python dependency floors current.
-# Actions are pinned by commit SHA (supply-chain hygiene), so without this
-# they would silently age forever.
 version: 2
 updates:
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-    groups:
-      actions:
-        patterns: ["*"]
-
   - package-ecosystem: pip
-    directory: "/"
+    directory: /
     schedule:
       interval: weekly
+    # A release that turns out to be malicious is usually pulled within days;
+    # waiting a week before proposing it costs nothing.
+    cooldown:
+      default-days: 7
     open-pull-requests-limit: 5
+    groups:
+      python-dependencies:
+        patterns: ['*']
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
