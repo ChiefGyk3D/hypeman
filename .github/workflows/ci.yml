@@ -24,17 +24,30 @@ jobs:
     secrets:
       DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}   # optional Service Token fallback; unset means OIDC only
     with:
-      python-versions: '["3.9", "3.10", "3.11", "3.12"]'
+      python-versions: '["3.9", "3.10", "3.11", "3.12", "3.13"]'
+      runners: '["ubuntu-24.04", "ubuntu-24.04-arm"]'
+      # Every declared extra is installed so a typo'd or renamed distribution
+      # in pyproject.toml fails here, not in a consuming daemon's CI.
       install-command: |
         python -m pip install --upgrade pip
-        pip install -e ".[dev]"
-      test-command: pytest
-      lint-install-command: |
-        pip install -e ".[dev]"
-      lint-command: |
-        ruff check .
-        ruff format --check . || echo "::warning title=ruff format::formatting drift (advisory)"
-        mypy
+        pip install -e ".[all,aws,vault,doppler,dev]"
+      test-command: pytest --cov=hypeman_social --cov-report=term-missing --cov-report=xml --cov-fail-under=65
+      lint-install-command: pip install ruff
+      lint-command: ruff check hypeman_social tests
+      typecheck-install-command: |
+        python -m pip install --upgrade pip
+        pip install -e ".[all,aws,vault,doppler,dev]"
+      typecheck-command: mypy hypeman_social
+      # The library promises to work with only its core dependencies installed:
+      # install with zero extras, import every subpackage, run the contract tests.
+      smoke-command: |
+        python -c "import hypeman_social"
+        python -c "import hypeman_social.config"
+        python -c "import hypeman_social.social"
+        python -c "import hypeman_social.llm"
+        python -c "import hypeman_social.observability"
+        pip install pytest
+        pytest tests/test_optional_extras.py -v
       docker-build: false
       egress-policy: block
       doppler-project: ci
