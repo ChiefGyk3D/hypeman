@@ -208,11 +208,25 @@ ruff check hypeman_social tests
 pytest
 ```
 
-CI runs the same lint and tests across Python 3.9–3.13, plus a mypy
-type-check (the package ships `py.typed`), a bare-install job (the package
-must work with zero extras), a coverage gate, and a build + `twine check` of
-the sdist and wheel. CodeQL and OpenSSF Scorecard run on every push to main,
-and Dependabot keeps the SHA-pinned actions and dependency floors current.
+CI is three short callers of the reusable workflows in
+[git-your-ship-together](https://github.com/ChiefGyk3D/git-your-ship-together)
+(`ci.yml`, `security.yml`, `release.yml`), pinned by commit. It runs the same
+lint and tests across Python 3.9–3.13, a mypy type-check (the package ships
+`py.typed`), a bare-install smoke job (the package must work with zero
+extras), a coverage gate, actionlint and zizmor over the workflows, and on
+every pull request a build + `twine check` + wheel smoke test of the sdist
+and wheel. CodeQL, gitleaks, Semgrep and dependency review run on every pull
+request; OpenSSF Scorecard runs on main. `docs.yml` stays local because the
+shared workflows have no Pages deploy. Dependabot keeps the pins current.
+
+Required status checks on `main` (branch protection):
+
+- `ci / CI green`
+- `security / CI green`
+- `package / CI green`
+
+Each is the single gate job of its workflow: it needs every other job there,
+so a job added later cannot merge unchecked.
 
 ## License
 

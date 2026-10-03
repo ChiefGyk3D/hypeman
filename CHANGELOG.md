@@ -6,6 +6,14 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+### Changed
+- CI, security scanning and the PyPI release now call the reusable workflows
+  in `ChiefGyk3D/git-your-ship-together` (v1.6.3) instead of hand-written
+  jobs: one `CI green` gate per workflow, egress blocked to measured hosts,
+  Semgrep and gitleaks added, build provenance and `SHA256SUMS` attached to
+  each GitHub release. `codeql.yml` and `scorecard.yml` are folded into
+  `security.yml`. Package contents are unchanged.
+
 ## [0.3.0] — 2026-09-28
 
 ### Added

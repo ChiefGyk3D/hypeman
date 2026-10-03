@@ -30,7 +30,7 @@ These encode production incidents; see [docs/DESIGN.md](docs/DESIGN.md):
    dependencies installed. A new third-party import gets a `try/except
    ImportError` guard, an entry in the matching extra in `pyproject.toml`,
    and a fail-closed `authenticate()` message. `tests/test_optional_extras.py`
-   and the CI bare-install job enforce this.
+   and the CI bare-install smoke job enforce this.
 2. **The availability contract.** No caller-visible `.enabled` gating;
    availability checks may heal. A failed `authenticate()` retains config
    so recovery has a target.
