@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   security:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@a9e0e136e7f448b6f6f350c16705e5bcc00f55d6 # v1.8.1
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/security.yml@9708d9d43bf0c27b8269c2387edc70c1efb22514 # v1.9.0
     permissions:
       contents: read
       security-events: write
@@ -34,6 +34,8 @@ jobs:
       egress-policy: block
       # Snyk reads SNYK_TOKEN from the Doppler config over OIDC (no stored secret).
       snyk: true
+      # No lock: Snyk Open Source scans a freeze of this install (GYST v1.9.0).
+      snyk-install-command: pip install ".[all,aws,vault,doppler]"
       doppler-project: ci
       doppler-config: ci
       doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
