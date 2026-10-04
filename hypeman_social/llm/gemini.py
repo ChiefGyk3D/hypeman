@@ -67,11 +67,14 @@ class GeminiLLM(BaseLLM):
             return False
 
         try:
+            # Env var NAMES for the secret managers, derived the same way
+            # social/base.py does for platforms (SECRETS_<BACKEND>_<SCOPE>_...).
+            scope = 'LLM'
             self.api_key = get_secret(
-                'LLM', 'gemini_api_key',
-                secret_name_env='SECRETS_AWS_LLM_SECRET_NAME',
-                secret_path_env='SECRETS_VAULT_LLM_SECRET_PATH',
-                doppler_secret_env='SECRETS_DOPPLER_LLM_SECRET_NAME',
+                scope, 'gemini_api_key',
+                secret_name_env=f'SECRETS_AWS_{scope}_SECRET_NAME',
+                secret_path_env=f'SECRETS_VAULT_{scope}_SECRET_PATH',
+                doppler_secret_env=f'SECRETS_DOPPLER_{scope}_SECRET_NAME',
             )
 
             # GEMINI_API_KEY unprefixed is the common Doppler/CI convention.
