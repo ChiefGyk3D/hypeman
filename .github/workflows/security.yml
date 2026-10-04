@@ -32,3 +32,8 @@ jobs:
       # covers what a pull request adds.
       pip-audit-requirements: ""
       egress-policy: block
+      # Snyk reads SNYK_TOKEN from the Doppler config over OIDC (no stored secret).
+      snyk: true
+      doppler-project: ci
+      doppler-config: ci
+      doppler-identity-id: ${{ vars.DOPPLER_IDENTITY_ID }}
