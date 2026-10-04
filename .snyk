@@ -1,0 +1,7 @@
+# Snyk Code ignores per-rule `ignore:` entries but honours `exclude: code:`.
+version: v1.25.0
+exclude:
+  code:
+    # Test fixtures: dummy credentials and env-var names fed to the code under
+    # test. Nothing here ships in the wheel.
+    - tests/**
