@@ -149,8 +149,6 @@ def count_emojis(message: str) -> int:
         "\U0001F600-\U0001F64F"  # emoticons
         "\U0001F300-\U0001F5FF"  # symbols & pictographs
         "\U0001F680-\U0001F6FF"  # transport & map symbols
-        "\U0001F1E0-\U0001F1FF"  # flags (iOS)
-        "\U00002702-\U000027B0"  # dingbats
         # Enclosed characters, split around the UTF-16 surrogate range
         # (U+D800-U+DFFF). The original single range here crossed straight
         # through it, which CodeQL flags as an overly-large/suspicious range:
@@ -158,7 +156,10 @@ def count_emojis(message: str) -> int:
         # so including them is meaningless at best and, on interpreters that
         # reject lone surrogates in a compiled pattern, a crash at best.
         # Splitting preserves every real character the range was meant to
-        # catch while excluding the invalid gap.
+        # catch while excluding the invalid gap. This also fully covers
+        # flags (U+1F1E0-U+1F1FF) and dingbats (U+2702-U+27B0), which used
+        # to be listed explicitly above and are omitted now that they'd
+        # just overlap these two ranges.
         "\U000024C2-\U0000D7FF"
         "\U0000E000-\U0001F251"
         "]", flags=re.UNICODE
