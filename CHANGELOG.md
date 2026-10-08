@@ -6,6 +6,21 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-10-08
+
+### Fixed
+- **Duplicate detection is now per platform.** The recently-posted history
+  was one list shared by every platform, so the Matrix, Bluesky and Mastodon
+  announcements for the same video (more than 80% of their words shared with
+  the Discord one) were rejected as "Duplicate of a recently posted message"
+  and fell back to the template. Measured on Boon-Tube-Daemon over 15
+  uploads, Mastodon passed 7 of 15 for this reason. `is_duplicate_message()`
+  and `add_to_message_cache()` take an optional `platform` (omitted means the
+  shared `generic` bucket), `generate_validated()` and `apply_guardrails()`
+  pass the `platform` they already receive, and the same text posted twice to
+  one platform is still rejected. Threshold, window size and
+  `LLM_ENABLE_DEDUPLICATION` are unchanged; existing callers need no change.
+
 ### Changed
 - CI, security scanning and the PyPI release now call the reusable workflows
   in `ChiefGyk3D/git-your-ship-together` (v1.6.3) instead of hand-written

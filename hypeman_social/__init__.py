@@ -22,6 +22,6 @@ What's in here:
 Nothing in here knows what you're announcing. That's the caller's business.
 """
 
-__version__ = '0.3.0'
+__version__ = '0.3.1'
 
 __all__ = ['__version__']

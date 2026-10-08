@@ -25,7 +25,7 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple
 
 from hypeman_social.config import get_bool_config, get_config
-from hypeman_social.llm.base import BaseLLM
+from hypeman_social.llm.base import BaseLLM, dedup_bucket
 from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
 logger = logging.getLogger(__name__)
@@ -89,7 +89,7 @@ class LLMManager:
         # is_duplicate_message() for why.
         self.enable_deduplication = get_bool_config('LLM', 'enable_deduplication', default=True)
         self.dedup_cache_size = int(get_config('LLM', 'dedup_cache_size', default='20'))
-        self._message_cache: List[str] = []
+        self._message_caches: Dict[str, List[str]] = {}
 
     def authenticate(self) -> bool:
         """
@@ -348,9 +348,11 @@ class LLMManager:
         else:
             logger.warning("⚠ Retry failed, using original message despite issues")
 
-        return self._accept_leniently(raw, username, char_limit)
+        return self._accept_leniently(raw, username, char_limit, platform)
 
-    def _accept_leniently(self, raw: str, username: str, char_limit: int) -> Optional[str]:
+    def _accept_leniently(
+        self, raw: str, username: str, char_limit: int, platform: Optional[str] = None,
+    ) -> Optional[str]:
         """
         Clean up a message that failed validation and ship it anyway,
         unless a hard veto (profanity, duplicate) applies.
@@ -370,11 +372,11 @@ class LLMManager:
                 logger.warning(f"✗ Dropping message, contains profanity: {', '.join(found)}")
                 return None
 
-        if self.is_duplicate_message(message):
+        if self.is_duplicate_message(message, platform):
             logger.warning("✗ Dropping message, duplicate of a recent announcement")
             return None
 
-        self.add_to_message_cache(message)
+        self.add_to_message_cache(message, platform)
         return message
 
     def _providers_in_order(self) -> List[Tuple[BaseLLM, bool]]:
@@ -399,10 +401,12 @@ class LLMManager:
 
         # The provider checked its own (unused) cache; apply the manager's,
         # which is the one that actually spans providers.
-        if message and self.is_duplicate_message(message):
+        # platform is the fourth positional argument of BaseLLM.apply_guardrails.
+        platform = kwargs.get('platform', args[3] if len(args) > 3 else None)
+        if message and self.is_duplicate_message(message, platform):
             return None, ['Duplicate of a recently posted message']
         if message:
-            self.add_to_message_cache(message)
+            self.add_to_message_cache(message, platform)
 
         return message, issues
 
@@ -424,19 +428,25 @@ class LLMManager:
     # Ollama to Gemini doesn't wipe the history of what you just posted.
     # ─────────────────────────────────────────────────────────────────────
 
-    def is_duplicate_message(self, message: str) -> bool:
+    def is_duplicate_message(self, message: str, platform: Optional[str] = None) -> bool:
         """
-        True if this is too close to something posted recently.
+        True if this is too close to something posted recently to the same
+        platform.
+
+        History is kept per platform, so one announcement sent to Discord,
+        Matrix, Bluesky and Mastodon is not four repeats of itself. Omit
+        ``platform`` for the shared ``generic`` bucket.
 
         Owned here rather than on a provider so it works before authenticate()
         and doesn't reset when we fail over from Ollama to Gemini.
         """
-        if not self.enable_deduplication or not self._message_cache:
+        history = self._message_caches.get(dedup_bucket(platform))
+        if not self.enable_deduplication or not history:
             return False
 
         normalized = _normalize_for_dedup(message)
 
-        for cached in self._message_cache:
+        for cached in history:
             cached_norm = _normalize_for_dedup(cached)
             if normalized == cached_norm:
                 return True
@@ -451,14 +461,15 @@ class LLMManager:
 
         return False
 
-    def add_to_message_cache(self, message: str) -> None:
-        """Remember a message so we don't repeat ourselves."""
+    def add_to_message_cache(self, message: str, platform: Optional[str] = None) -> None:
+        """Remember a message so we don't repeat ourselves on that platform."""
         if not self.enable_deduplication:
             return
 
-        self._message_cache.append(message)
-        if len(self._message_cache) > self.dedup_cache_size:
-            self._message_cache = self._message_cache[-self.dedup_cache_size:]
+        history = self._message_caches.setdefault(dedup_bucket(platform), [])
+        history.append(message)
+        if len(history) > self.dedup_cache_size:
+            del history[:-self.dedup_cache_size]
 
     def status(self) -> Dict[str, Any]:
         """Machine-readable state of every provider, for the health endpoint."""

@@ -28,6 +28,11 @@ from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 logger = logging.getLogger(__name__)
 
 
+def dedup_bucket(platform: Optional[str]) -> str:
+    """Key for the per-platform duplicate history; no platform means ``generic``."""
+    return (platform or 'generic').strip().lower() or 'generic'
+
+
 class BaseLLM(ABC):
     """
     Shared behaviour for every LLM provider: config, guardrails, dedup, recovery.
@@ -105,7 +110,7 @@ class BaseLLM(ABC):
         self.enable_platform_validation = get_bool_config('LLM', 'enable_platform_validation', default=True)
 
         # Recently posted messages, so we don't repeat ourselves.
-        self._message_cache: List[str] = []
+        self._message_caches: Dict[str, List[str]] = {}
 
     # ─────────────────────────────────────────────────────────────────────
     # Availability — the whole point of this class
@@ -400,14 +405,22 @@ class BaseLLM(ABC):
     # Deduplication (stateful, so it lives here rather than in guardrails)
     # ─────────────────────────────────────────────────────────────────────
 
-    def is_duplicate_message(self, message: str) -> bool:
-        """True if this message is too close to something we posted recently."""
-        if not self.enable_deduplication or not self._message_cache:
+    def is_duplicate_message(self, message: str, platform: Optional[str] = None) -> bool:
+        """
+        True if this message is too close to something we posted recently
+        to the same platform.
+
+        History is kept per platform: one announcement sent to several
+        platforms is not a repeat. Omit ``platform`` for the shared
+        ``generic`` bucket.
+        """
+        history = self._message_caches.get(dedup_bucket(platform))
+        if not self.enable_deduplication or not history:
             return False
 
         normalized = self._normalize_for_dedup(message)
 
-        for cached in self._message_cache:
+        for cached in history:
             cached_norm = self._normalize_for_dedup(cached)
             if normalized == cached_norm:
                 return True
@@ -422,14 +435,15 @@ class BaseLLM(ABC):
 
         return False
 
-    def add_to_message_cache(self, message: str) -> None:
+    def add_to_message_cache(self, message: str, platform: Optional[str] = None) -> None:
         """Remember a message so we don't post something near-identical next time."""
         if not self.enable_deduplication:
             return
 
-        self._message_cache.append(message)
-        if len(self._message_cache) > self.dedup_cache_size:
-            self._message_cache = self._message_cache[-self.dedup_cache_size:]
+        history = self._message_caches.setdefault(dedup_bucket(platform), [])
+        history.append(message)
+        if len(history) > self.dedup_cache_size:
+            del history[:-self.dedup_cache_size]
 
     @staticmethod
     def _normalize_for_dedup(message: str) -> str:
@@ -505,12 +519,12 @@ class BaseLLM(ABC):
                 issues.append(f'Quality score {score} below minimum {self.min_quality_score}')
                 issues.extend(score_issues)
 
-        if self.is_duplicate_message(message):
+        if self.is_duplicate_message(message, platform):
             issues.append('Duplicate of a recently posted message')
 
         if issues:
             return None, issues
 
         message = guardrails.safe_trim(message, char_limit)
-        self.add_to_message_cache(message)
+        self.add_to_message_cache(message, platform)
         return message, []

@@ -151,7 +151,7 @@ implementation detail, visible in `status()`, not at the call site.
 | `generate_validated` | `(build_prompt, *, title='', username='', platform='generic', char_limit=500, expected_hashtags=0, max_tokens=None) -> str \| None` | Generate → guardrails → one stricter retry. `build_prompt` is a prompt string or a `(strict: bool) -> str` callable. Leniently ships the original when the retry still has issues (style problems beat silence), with two hard vetoes: profanity when the filter is on, and duplicates. None = use your template |
 | `apply_guardrails` | `(message, title, username, platform, char_limit, expected_hashtag_count=0) -> (str \| None, list[str])` | Full quality gauntlet; `(None, issues)` means don't post it |
 | `heartbeat` | `(min_interval=None) -> bool` | Rate-limited liveness probe across every provider; call once per poll cycle so recovery is noticed on your schedule |
-| `is_duplicate_message` / `add_to_message_cache` | | Dedup lives here, not on a provider, so failover doesn't wipe the recently-posted history |
+| `is_duplicate_message` / `add_to_message_cache` | | Dedup lives here, not on a provider, so failover doesn't wipe the recently-posted history. History is per platform; `platform` is optional (default: the `generic` bucket) |
 | `status` | `() -> dict` | `{enabled, available, using_fallback, primary: {...}, fallbacks: [...]}` |
 | `provider` | property | Primary provider name, or None |
 | `active` | property | The provider that would serve the next request |
