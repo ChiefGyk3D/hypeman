@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   package:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@0e58a0e61ea8b3800d1cb0e6ed81bb860ace2094 # v1.6.3
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@804400181a9d3e2f78dfcda5161e2bd960bc011a # v1.15.0
     permissions:
       contents: write      # attach the files to the GitHub release
       id-token: write      # PyPI Trusted Publishing and build provenance
