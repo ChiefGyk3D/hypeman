@@ -6,6 +6,11 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-10-08
+
+### Changed
+- 0.3.2: republish of 0.3.1 with GYST v1.17.0 so the PyPI publish step can pull its image; no code change.
+
 ## [0.3.1] — 2026-10-08
 
 ### Fixed
