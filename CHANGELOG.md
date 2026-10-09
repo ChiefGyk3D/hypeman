@@ -6,6 +6,16 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.3.4] — 2026-10-09
+
+### Fixed
+- **PyPI publishing, for real.** 0.3.3 moved the upload into a job of this
+  repository's `release.yml` but wrapped `pypa/gh-action-pypi-publish` in a
+  composite action, and that action names its Docker image from the
+  repository that contains it, so the image pull failed. The pypa action is
+  now a direct step of the job, as it was for 0.2.0. 0.3.4 carries the code of
+  0.3.1 to 0.3.3 unchanged and is the first 0.3 release on PyPI.
+
 ## [0.3.3] — 2026-10-09
 
 ### Fixed
