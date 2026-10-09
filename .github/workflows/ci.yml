@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   ci:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@f4617e1b478d1995938d6ef33fd30d417e79ba30 # v1.19.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-ci.yml@044eccde67b23ff6c864ddcb9927c4ff653a30c7 # v1.20.0
     permissions:
       contents: read
       id-token: write   # Doppler OIDC and Codecov; python-ci keeps it off the test job
