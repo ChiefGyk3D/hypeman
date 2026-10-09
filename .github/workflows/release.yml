@@ -4,7 +4,8 @@
 # jobs live in ChiefGyk3D/git-your-ship-together. docs/PUBLISHING.md is the
 # procedure; the PyPI publisher names this file and the `pypi` environment.
 # PyPI Trusted Publishing cannot use a reusable workflow as the publisher, so
-# the upload itself is the `publish-pypi` job below, in this file.
+# the upload itself is the `publish-pypi` job below, in this file, with the pypa
+# action as a direct step.
 name: Release to PyPI
 
 on:
@@ -48,4 +49,12 @@ jobs:
           allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443
           disable-sudo: true
           disable-telemetry: true
-      - uses: ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi@f4617e1b478d1995938d6ef33fd30d417e79ba30 # v1.19.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: dist
+          path: dist/
+      # A direct step: this action runs a Docker image it names from the repository
+      # that contains it, so it fails when wrapped in a composite action.
+      - uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # v1.14.2
+        with:
+          attestations: true
