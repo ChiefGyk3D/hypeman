@@ -3,6 +3,8 @@
 # token) and attach the files, SHA256SUMS and provenance to the release. The
 # jobs live in ChiefGyk3D/git-your-ship-together. docs/PUBLISHING.md is the
 # procedure; the PyPI publisher names this file and the `pypi` environment.
+# PyPI Trusted Publishing cannot use a reusable workflow as the publisher, so
+# the upload itself is the `publish-pypi` job below, in this file.
 name: Release to PyPI
 
 on:
@@ -16,7 +18,7 @@ permissions:
 
 jobs:
   package:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@cc7fa6f48a612183ecd900ed15810da61b30288a # v1.17.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@f4617e1b478d1995938d6ef33fd30d417e79ba30 # v1.19.0
     permissions:
       contents: write      # attach the files to the GitHub release
       id-token: write      # PyPI Trusted Publishing and build provenance
@@ -27,3 +29,23 @@ jobs:
       smoke-command: python -c "import hypeman_social; print(hypeman_social.__version__)"
       release-notes-command: awk -v v="$VERSION" 'index($0, "## [" v "]") == 1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md
       egress-policy: block
+
+  publish-pypi:
+    needs: package
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hypeman-social
+    permissions:
+      contents: read
+      id-token: write      # PyPI Trusted Publishing
+    steps:
+      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
+        with:
+          egress-policy: block
+          allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443
+          disable-sudo: true
+          disable-telemetry: true
+      - uses: ChiefGyk3D/git-your-ship-together/.github/actions/publish-pypi@f4617e1b478d1995938d6ef33fd30d417e79ba30 # v1.19.0

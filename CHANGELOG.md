@@ -6,6 +6,17 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] — 2026-10-09
+
+### Fixed
+- **PyPI publishing works again.** PyPI Trusted Publishing cannot use a
+  reusable workflow as the publisher (pypi/warehouse#11096), so 0.3.1 and
+  0.3.2 reached GitHub but were rejected by PyPI with `invalid-publisher`.
+  The upload now runs in a `publish-pypi` job of this repository's own
+  `release.yml` (GYST v1.19.0's `publish-pypi` composite action). 0.3.3 is the
+  first version of the 0.3 line on PyPI; it carries the code of 0.3.1 and
+  0.3.2 with no change.
+
 ## [0.3.2] — 2026-10-08
 
 ### Changed
