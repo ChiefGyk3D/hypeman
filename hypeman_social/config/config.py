@@ -26,7 +26,7 @@ from dotenv import load_dotenv
 logger = logging.getLogger(__name__)
 
 # Track whether we've already loaded a .env so repeat calls are cheap no-ops.
-_env_loaded = False
+_env_state = {'loaded': False}
 
 # Values starting with this prefix are template placeholders, not real config.
 _PLACEHOLDER_PREFIX = 'YOUR_'
@@ -47,16 +47,14 @@ def load_config(env_path: str = ".env") -> bool:
     Returns:
         True if a file was found and loaded, False otherwise.
     """
-    global _env_loaded
-
-    if _env_loaded:
+    if _env_state['loaded']:
         return True
 
     env_file = Path(env_path)
     if env_file.exists():
         load_dotenv(env_file)
         logger.info(f"✓ Loaded configuration from {env_path}")
-        _env_loaded = True
+        _env_state['loaded'] = True
         return True
 
     logger.warning(f"⚠ Configuration file not found: {env_path}")

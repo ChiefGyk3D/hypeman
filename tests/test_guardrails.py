@@ -11,6 +11,8 @@ hallucination, and so is a video announcement claiming you're "live now". These
 tests pin that behaviour so the two daemons can't drift apart again.
 """
 
+import re
+
 import pytest
 
 from hypeman_social.llm import guardrails
@@ -297,3 +299,69 @@ def test_count_emojis_does_not_cross_the_utf16_surrogate_range():
     assert guardrails.count_emojis("circled M \U000024C2") == 1
     # And one from well above it.
     assert guardrails.count_emojis("squared cjk \U0001F250") == 1
+
+
+# The emoji pattern as it stood before the CodeQL py/overly-large-range fix:
+# one "enclosed characters" range, split around the surrogate gap, that still
+# swept U+24C2-U+D7FF and U+E000-U+1F251 into the count.
+_OLD_EMOJI_RE = re.compile(
+    "["
+    "\U0001F600-\U0001F64F"
+    "\U0001F300-\U0001F5FF"
+    "\U0001F680-\U0001F6FF"
+    "\U000024C2-\U0000D7FF"
+    "\U0000E000-\U0001F251"
+    "]", flags=re.UNICODE
+)
+
+# Characters the pattern is meant to count: emoticons, pictographs, transport,
+# flags (regional indicators), dingbats, circled M, squared/enclosed forms.
+_INTENDED_EMOJI = [
+    "\U0001F600", "\U0001F64F",  # emoticons, both ends
+    "\U0001F300", "\U0001F5FF",  # symbols & pictographs
+    "\U0001F680", "\U0001F6FF",  # transport & map
+    "\U0001F1E6", "\U0001F1FF",  # regional indicators (flags)
+    "✂", "➰",          # dingbats, both ends
+    "Ⓜ",                    # circled M
+    "\U0001F004", "\U0001F0CF", "\U0001F170", "\U0001F251",  # mahjong, joker, squared letters, enclosed ideographic
+]
+
+# Characters the old range matched by accident but are not emoji.
+_NOT_EMOJI = [
+    "a", "Z", "5", " ", ".", "é",  # ASCII and Latin-1
+    "Ⓛ", "Ⓝ",                 # neighbours of circled M
+    "中", "漢",                 # CJK ideographs
+    "가", "힣",                 # Hangul syllables (힣 is the last)
+    "あ", "カ",                 # kana
+    "", "",                 # private use area
+    "Ａ",                           # fullwidth Latin
+    "\U00020000",                       # CJK extension B
+]
+
+
+@pytest.mark.parametrize("ch", _INTENDED_EMOJI)
+def test_count_emojis_counts_every_intended_character(ch):
+    assert guardrails.count_emojis(ch) == 1
+    assert guardrails.count_emojis(f"x{ch}y") == 1
+
+
+@pytest.mark.parametrize("ch", _NOT_EMOJI)
+def test_count_emojis_ignores_ordinary_text(ch):
+    """Negative case: CJK, Hangul, kana and private-use are not emoji.
+
+    The previous range matched all of these, so a Japanese or Korean post
+    was counted as emoji and could trip the emoji cap.
+    """
+    assert guardrails.count_emojis(ch) == 0
+
+
+def test_old_emoji_range_overcounted_non_emoji():
+    """Pins the bug: the old pattern really did match the non-emoji set."""
+    assert all(_OLD_EMOJI_RE.search(ch) for ch in ("中", "가", ""))
+
+
+def test_new_emoji_pattern_is_a_subset_of_the_old_for_the_intended_set():
+    """Behaviour preserved: everything intended was counted by the old one."""
+    for ch in _INTENDED_EMOJI:
+        assert _OLD_EMOJI_RE.search(ch), ch
+        assert guardrails.count_emojis(ch) == 1, ch

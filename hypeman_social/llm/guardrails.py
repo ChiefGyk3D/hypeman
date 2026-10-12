@@ -149,19 +149,14 @@ def count_emojis(message: str) -> int:
         "\U0001F600-\U0001F64F"  # emoticons
         "\U0001F300-\U0001F5FF"  # symbols & pictographs
         "\U0001F680-\U0001F6FF"  # transport & map symbols
-        # Enclosed characters, split around the UTF-16 surrogate range
-        # (U+D800-U+DFFF). The original single range here crossed straight
-        # through it, which CodeQL flags as an overly-large/suspicious range:
-        # those code points are not valid standalone Unicode scalar values,
-        # so including them is meaningless at best and, on interpreters that
-        # reject lone surrogates in a compiled pattern, a crash at best.
-        # Splitting preserves every real character the range was meant to
-        # catch while excluding the invalid gap. This also fully covers
-        # flags (U+1F1E0-U+1F1FF) and dingbats (U+2702-U+27B0), which used
-        # to be listed explicitly above and are omitted now that they'd
-        # just overlap these two ranges.
-        "\U000024C2-\U0000D7FF"
-        "\U0000E000-\U0001F251"
+        "\U0001F000-\U0001F251"  # mahjong/cards, enclosed alphanumerics and ideographics, flags
+        "\U00002700-\U000027BF"  # dingbats
+        "\U000024C2"             # circled M
+        "\U000025AA\U000025AB\U000025B6\U000025C0\U000025FB-\U000025FE"  # geometric emoji
+        "\U00002600-\U000026FF"  # miscellaneous symbols (sun, lightning, card suits)
+        "\U00002934\U00002935\U00002B05-\U00002B07\U00002B1B\U00002B1C"  # arrows, squares
+        "\U00002B50\U00002B55"  # star, circle
+        "\U00003030\U0000303D\U00003297\U00003299"  # wavy dash, part alternation, circled ideographs
         "]", flags=re.UNICODE
     )
     return len(emoji_pattern.findall(message))
