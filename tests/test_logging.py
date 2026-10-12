@@ -5,6 +5,7 @@
 """Tests for log rotation, level control, and repeat suppression."""
 
 import logging
+import time
 
 import pytest
 
@@ -155,10 +156,8 @@ def test_warnings_and_errors_are_never_suppressed():
 
 def test_suppression_window_expiry_reports_the_count(monkeypatch):
     """When the window closes, say how much was swallowed."""
-    import hypeman_social.observability.logging as mod
-
     clock = {'t': 1000.0}
-    monkeypatch.setattr(mod.time, 'monotonic', lambda: clock['t'])
+    monkeypatch.setattr(time, 'monotonic', lambda: clock['t'])
 
     f = RateLimitFilter(window_seconds=60)
     msg = "still nothing happening"
