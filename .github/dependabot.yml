@@ -22,3 +22,13 @@ updates:
     cooldown:
       default-days: 7
     open-pull-requests-limit: 5
+
+  # The hash-pinned lock the docs workflow installs from
+  # (requirements/docs.txt, from the `docs` extra via pip-compile --generate-hashes).
+  - package-ecosystem: pip
+    directory: "/requirements"
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
