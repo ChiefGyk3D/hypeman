@@ -583,3 +583,29 @@ class TestBlueskyTruncation:
 
     def test_post_before_auth_returns_none(self):
         assert BlueskyPlatform().post('hello') is None
+
+
+class TestMatrixLogsStayFreeOfSecretStoreValues:
+    """Auth log lines name the outcome only, never values from the secret store."""
+
+    def test_authenticated_line_omits_room_id(self, matrix_env, monkeypatch, caplog):
+        monkeypatch.setenv('MATRIX_ACCESS_TOKEN', 'tok-sentinel')
+        with caplog.at_level('DEBUG'):
+            assert MatrixPlatform().authenticate() is True
+        assert 'Matrix authenticated' in caplog.text  # collected something
+        assert '!room:matrix.example' not in caplog.text
+        assert 'tok-sentinel' not in caplog.text
+
+    def test_login_line_omits_token_and_expiry(self, matrix_env, monkeypatch, caplog):
+        monkeypatch.setenv('MATRIX_USERNAME', '@bot:matrix.example')
+        monkeypatch.setenv('MATRIX_PASSWORD', 'pw-sentinel')
+        body = {'access_token': 'fresh-sentinel', 'expires_in_ms': 987654321}
+        monkeypatch.setattr(
+            'hypeman_social.social.matrix.requests.post',
+            lambda url, json=None, timeout=None, headers=None: FakeResponse(200, body),
+        )
+        with caplog.at_level('DEBUG'):
+            assert MatrixPlatform().authenticate() is True
+        assert 'Obtained Matrix access token' in caplog.text
+        for secret in ('fresh-sentinel', 'pw-sentinel', '987654321'):
+            assert secret not in caplog.text

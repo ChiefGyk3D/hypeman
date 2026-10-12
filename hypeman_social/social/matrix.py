@@ -88,7 +88,7 @@ class MatrixPlatform(SocialPlatform):
         
         self.enabled = True
         self.authenticated = True
-        logger.info(f"✓ Matrix authenticated ({self.room_id})")
+        logger.info("✓ Matrix authenticated")
         return True
     
     def _login_and_get_token(self):
@@ -117,7 +117,7 @@ class MatrixPlatform(SocialPlatform):
                 data = response.json()
                 access_token = data.get('access_token')
                 if access_token:
-                    logger.info(f"✓ Obtained Matrix access token (expires: {data.get('expires_in_ms', 'never')})")
+                    logger.info("✓ Obtained Matrix access token")
                     return access_token
                 else:
                     logger.error("✗ Matrix login succeeded but no access_token in response")
