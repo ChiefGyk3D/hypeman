@@ -195,7 +195,7 @@ def load_secrets_from_doppler(secret_name: str) -> Dict[str, Any]:
     }
 
     if not bundle:
-        logger.debug(f"No Doppler secrets found with prefix {prefix}")
+        logger.debug("No Doppler secrets found for the requested bundle")
 
     return bundle
 

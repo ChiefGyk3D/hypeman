@@ -126,3 +126,15 @@ class TestDopplerConfigLookup:
 
     def test_missing_key_falls_through_to_default(self):
         assert get_config('Settings', 'nothing_here', default='dflt') == 'dflt'
+
+
+class TestDopplerBundleLogging:
+    def test_empty_bundle_log_omits_prefix(self, monkeypatch, caplog):
+        from hypeman_social.config import secrets
+
+        monkeypatch.setenv('DOPPLER_TOKEN', 'dp.st.test')
+        monkeypatch.setattr(secrets, '_doppler_cache', {'OTHER_KEY': 'v'})
+        with caplog.at_level('DEBUG'):
+            assert secrets.load_secrets_from_doppler('zzbundle') == {}
+        assert 'No Doppler secrets found' in caplog.text  # collected something
+        assert 'ZZBUNDLE' not in caplog.text.upper()
