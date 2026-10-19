@@ -118,6 +118,16 @@ All notable changes to hypeman-social. The format follows
   bot's own as `is_self`, maps roles from configured ids only, and ignores DMs.
   New `discord-chat` extra (`websocket-client`), also part of `all`. See
   `docs/DISCORD_CHAT.md`.
+- **Discord chat hardening** (review round on the above): resume URLs and the
+  gateway URL are validated before the token is sent and handshake redirects
+  are off; inbound frames are capped at 2 MiB in encoded bytes before the payload
+  is read; stop/start cannot overlap workers and cancellation never sends
+  Identify; resumable reconnects no longer close with 1000; Identify spacing,
+  a daily budget and a backoff that survives READY; owner changes via
+  `GUILD_UPDATE`/`GUILD_DELETE`; transport errors logged by type only; replies
+  deduplicated with an enforced nonce; shared global and per-channel rate-limit
+  deadlines; `start()` heals a fatal close; invalid configured filters fail
+  closed.
 
 ## [0.3.4] — 2026-10-09
 
