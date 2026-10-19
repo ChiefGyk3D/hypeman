@@ -109,7 +109,9 @@ When the connected Ollama model advertises the `thinking` capability, hypeman
 passes an explicit `think` parameter on every generation: `think=false` forces
 a direct answer, `think=true` routes reasoning into the response's thinking
 field where extraction can reach it. Models (and old servers) without the
-capability never see the parameter.
+capability never see the parameter. With thinking mode off (the default) a
+thinking-capable model is sent `think=false`, so a one-sentence chat answer is
+not spent on hidden reasoning.
 
 ## LLM: provider selection and failover
 
@@ -132,7 +134,9 @@ Install extra: `hypeman-social[ollama]`.
 |---|---|---|
 | `LLM_OLLAMA_HOST` | Server host; `http://` is assumed when no scheme given | `http://localhost` |
 | `LLM_OLLAMA_PORT` | Port, appended only when the host has none | `11434` |
-| `LLM_OLLAMA_MODEL` | Model, e.g. `gemma3:4b`, `qwen3:8b`, `llama3` | `gemma3:4b` |
+| `LLM_OLLAMA_MODEL` | Model, e.g. `gemma4:12b`, `gemma3:4b`, `qwen3:8b` | `gemma4:12b` |
+| `LLM_OLLAMA_NUM_CTX` | Context size, sent as `options.num_ctx` exactly as written. Leave unset to send nothing. On a shared GPU, a `num_ctx` different from the one the model is loaded with makes Ollama reload it and can evict another resident model, so set this only to the value your server already uses | *(not sent)* |
+| `LLM_OLLAMA_KEEP_ALIVE` | Passed as `keep_alive` when set (e.g. `30s`, `5m`), so a non-resident model can be given a short residency | *(not sent)* |
 
 A model missing from the server logs a warning but doesn't fail —
 Ollama pulls it on first use.
@@ -294,7 +298,7 @@ Optional; use `configure_logging()` from `hypeman_social.observability`.
 LLM_ENABLE=true
 LLM_PROVIDER=ollama
 LLM_OLLAMA_HOST=http://192.168.1.50
-LLM_OLLAMA_MODEL=gemma3:4b
+LLM_OLLAMA_MODEL=gemma4:12b
 LLM_FALLBACK_PROVIDER=gemini
 LLM_GEMINI_MODEL=gemini-2.0-flash-lite
 GEMINI_API_KEY=...
@@ -325,7 +329,7 @@ MATRIX_PASSWORD=...
 LLM_ENABLE=true
 LLM_PROVIDER=ollama
 LLM_OLLAMA_HOST=http://localhost
-LLM_OLLAMA_MODEL=gemma3:4b
+LLM_OLLAMA_MODEL=gemma4:12b
 # no LLM_FALLBACK_PROVIDER: an Ollama outage means template posts, not Google
 ```
 

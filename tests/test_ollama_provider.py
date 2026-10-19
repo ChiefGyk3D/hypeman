@@ -204,3 +204,101 @@ def test_thinking_detection_failure_means_no_think_param():
     llm = OllamaLLM()
     llm.model = 'gemma3:4b'
     assert llm._detect_thinking_support(SimpleNamespace(show=boom)) is False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Default model, num_ctx, keep_alive
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _fake_ollama_module(monkeypatch):
+    """Patch the ollama module with a fake Client; no network, no server."""
+    import hypeman_social.llm.ollama as mod
+
+    class FakeClient:
+        def __init__(self, host=None):
+            self.host = host
+
+        def list(self):
+            return {'models': []}
+
+        def show(self, model):
+            return {'capabilities': ['completion']}
+
+    monkeypatch.setattr(mod, 'ollama', SimpleNamespace(Client=FakeClient), raising=False)
+    monkeypatch.setattr(mod, 'OLLAMA_AVAILABLE', True)
+
+
+def _clear_ollama_env(monkeypatch):
+    for key in ('LLM_MODEL', 'LLM_OLLAMA_MODEL', 'LLM_NUM_CTX', 'LLM_OLLAMA_NUM_CTX',
+                'LLM_KEEP_ALIVE', 'LLM_OLLAMA_KEEP_ALIVE'):
+        monkeypatch.delenv(key, raising=False)
+
+
+def test_default_model_is_gemma4_12b(monkeypatch):
+    _fake_ollama_module(monkeypatch)
+    _clear_ollama_env(monkeypatch)
+    llm = OllamaLLM()
+    llm.authenticate()
+    assert llm.model == 'gemma4:12b'
+
+
+def test_model_can_be_pinned_to_the_old_default(monkeypatch):
+    _fake_ollama_module(monkeypatch)
+    _clear_ollama_env(monkeypatch)
+    monkeypatch.setenv('LLM_OLLAMA_MODEL', 'gemma3:4b')
+    llm = OllamaLLM()
+    llm.authenticate()
+    assert llm.model == 'gemma3:4b'
+
+
+def test_num_ctx_and_keep_alive_not_sent_when_unset(monkeypatch):
+    _fake_ollama_module(monkeypatch)
+    _clear_ollama_env(monkeypatch)
+    calls = []
+    llm = OllamaLLM()
+    llm.authenticate()
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert 'num_ctx' not in calls[0]['options']
+    assert 'keep_alive' not in calls[0]
+
+
+def test_num_ctx_sent_exactly_as_configured(monkeypatch):
+    _fake_ollama_module(monkeypatch)
+    _clear_ollama_env(monkeypatch)
+    monkeypatch.setenv('LLM_OLLAMA_NUM_CTX', '8192')
+    calls = []
+    llm = OllamaLLM()
+    llm.authenticate()
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert calls[0]['options']['num_ctx'] == 8192
+
+
+def test_keep_alive_passed_through_when_set(monkeypatch):
+    _fake_ollama_module(monkeypatch)
+    _clear_ollama_env(monkeypatch)
+    monkeypatch.setenv('LLM_OLLAMA_KEEP_ALIVE', '30s')
+    calls = []
+    llm = OllamaLLM()
+    llm.authenticate()
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert calls[0]['keep_alive'] == '30s'
+
+
+def test_invalid_num_ctx_is_not_sent(monkeypatch):
+    """A typo must not become a guessed number; it is dropped with a warning."""
+    _fake_ollama_module(monkeypatch)
+    _clear_ollama_env(monkeypatch)
+    monkeypatch.setenv('LLM_OLLAMA_NUM_CTX', 'lots')
+    calls = []
+    llm = OllamaLLM()
+    llm.authenticate()
+    llm.client = SimpleNamespace(generate=_capture_generate(calls))
+
+    llm._raw_generate("prompt", 150)
+    assert 'num_ctx' not in calls[0]['options']

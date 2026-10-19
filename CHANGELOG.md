@@ -6,6 +6,22 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **The Ollama default model is now `gemma4:12b` (was `gemma3:4b`).** Any
+  daemon that sets no `LLM_OLLAMA_MODEL` / `LLM_MODEL` will ask its server for
+  `gemma4:12b` after upgrading, which needs more memory and a pull. To keep
+  the old behaviour, set `LLM_OLLAMA_MODEL=gemma3:4b`.
+
+### Added
+- `LLM_OLLAMA_NUM_CTX`: sent as `options.num_ctx` exactly as configured; unset
+  sends nothing. A `num_ctx` that differs from the loaded one makes Ollama
+  reload the model and can evict another resident model on a shared GPU.
+- `LLM_OLLAMA_KEEP_ALIVE`: passed as `keep_alive` when set; unset sends nothing.
+
+### Tests
+- Locked in that thinking-capable models get `think=false` when thinking mode
+  is off (already the behaviour; no code change).
+
 ## [0.3.4] — 2026-10-09
 
 ### Fixed
