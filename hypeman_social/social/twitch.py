@@ -226,7 +226,13 @@ def _default_connect(url: str, timeout: float) -> Any:
     options: Dict[str, Any] = {'timeout': timeout, 'redirect_limit': 0}
     if _BoundedWebSocket is not None:
         options['class_'] = _BoundedWebSocket
-    return websocket.create_connection(url, **options)
+    ws = websocket.create_connection(url, **options)
+    # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
+    # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
+    if ws.getstatus() != 101:
+        ws.close()
+        raise OSError('EventSub handshake was not an upgrade')
+    return ws
 
 
 def _parse_timestamp(value: Any) -> Optional[float]:
@@ -464,7 +470,7 @@ class TwitchChat(ChatReceiver):
         if resp.status_code == 401:
             return 'invalid', 0
         if resp.status_code != 200:
-            logger.warning('Twitch token validation returned HTTP %s', resp.status_code)
+            logger.warning('Twitch auth validation returned HTTP %s', resp.status_code)
             return 'transient', 0
         try:
             body = resp.json()
@@ -494,7 +500,7 @@ class TwitchChat(ChatReceiver):
         })
         if resp is None or resp.status_code != 200:
             if resp is not None:
-                logger.warning('Twitch token refresh returned HTTP %s', resp.status_code)
+                logger.warning('Twitch auth refresh returned HTTP %s', resp.status_code)
             return False
         try:
             body = resp.json()
@@ -525,7 +531,7 @@ class TwitchChat(ChatReceiver):
         try:
             self._on_token_refresh(pending[0], pending[1])
         except Exception as e:
-            logger.warning('Twitch on_token_refresh callback failed: %s', type(e).__name__)
+            logger.warning('Twitch refresh callback failed: %s', type(e).__name__)
 
     def _ensure_auth(self, force: bool = False) -> bool:
         """True when the token is validated and fresh; heals within cooldowns."""
@@ -556,7 +562,7 @@ class TwitchChat(ChatReceiver):
             try:
                 reset_secret_cache()
             except Exception as e:
-                logger.debug('Twitch secret cache reset failed: %s', type(e).__name__)
+                logger.debug('Twitch credential cache reset failed: %s', type(e).__name__)
         if not self._load_credentials():
             return False
 
@@ -1062,6 +1068,7 @@ class TwitchChat(ChatReceiver):
             if 0 < wait <= 60:
                 return wait
         except Exception:
+            # No usable Ratelimit-Reset header: fall back to the default pause.
             pass
         return 30.0
 
