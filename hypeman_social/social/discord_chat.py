@@ -366,7 +366,7 @@ class DiscordChat(ChatReceiver):
             logger.warning('Discord chat needs websocket-client: pip install "hypeman-social[discord-chat]"')
             return False
         if not self._token:
-            logger.warning('Discord chat: no bot_token configured')
+            logger.warning('Discord chat: no bot credential configured')
             return False
         if self._config_error:
             logger.error('Discord chat: %s', self._config_error)
@@ -436,9 +436,15 @@ class DiscordChat(ChatReceiver):
     def _connect(self, url: str) -> Any:
         # redirect_limit=0: a handshake redirect would carry the next frame
         # (Identify or Resume, with the token) to a host nobody checked.
-        return websocket.create_connection(
+        ws = websocket.create_connection(
             url, timeout=POLL_SECONDS, redirect_limit=0,
             class_=_BoundedWebSocket, fire_cont_frame=True)
+        # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
+        # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
+        if ws.getstatus() != 101:
+            ws.close()
+            raise websocket.WebSocketException('Gateway handshake was not an upgrade')
+        return ws
 
     def _wait(self, seconds: float) -> bool:
         """Sleep between connection attempts; True if asked to stop meanwhile."""

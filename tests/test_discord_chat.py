@@ -110,6 +110,9 @@ class FakeWS:
         self.closed_with = []
         self.on_empty = on_empty
 
+    def getstatus(self):
+        return 101
+
     def recv_data_frame(self, control_frame):
         if not self.frames:
             if not self.on_empty:
@@ -1494,3 +1497,22 @@ def test_non_finite_reset_after_does_not_wedge_the_bucket(chat):
         Resp(200)])
     assert chat.send(CHAN, 'a') and chat.send(CHAN, 'b')
     assert sleeps == []
+
+
+def test_connect_refuses_a_handshake_that_is_not_an_upgrade(chat, monkeypatch):
+    """websocket-client 1.9.0 calls a socket connected after a 3xx reply when
+    redirect_limit is 0; _connect must refuse it, and close it, on any version."""
+    class Redirected(FakeWS):
+        closed = False
+
+        def getstatus(self):
+            return 302
+
+        def close(self, *args, **kwargs):
+            self.closed = True
+
+    ws = Redirected([])
+    monkeypatch.setattr(dc.websocket, 'create_connection', lambda url, **kw: ws)
+    with pytest.raises(websocket.WebSocketException):
+        chat._connect(dc.GATEWAY_URL)
+    assert ws.closed is True
