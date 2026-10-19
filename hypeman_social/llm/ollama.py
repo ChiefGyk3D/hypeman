@@ -19,7 +19,7 @@ posts, not a daemon restart.
 """
 
 import logging
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from hypeman_social.config import get_config
 from hypeman_social.llm import guardrails
@@ -245,7 +245,7 @@ class OllamaLLM(BaseLLM):
         # comes back empty. think=False forces a direct answer; think=True
         # routes the reasoning into the response's thinking field, where the
         # extraction below can reach it.
-        extra = {}
+        extra: Dict[str, Any] = {}
         if self._supports_thinking:
             extra['think'] = bool(self.enable_thinking_mode)
 
