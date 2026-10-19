@@ -17,6 +17,7 @@ authenticates or generates.
 - [Social: Bluesky](#social-bluesky)
 - [Social: Mastodon](#social-mastodon)
 - [Social: Discord](#social-discord)
+- [Chat: Discord (receiving)](#chat-discord-receiving)
 - [Social: Matrix](#social-matrix)
 - [Chat: Twitch](#chat-twitch)
 - [Logging](#logging)
@@ -367,6 +368,21 @@ green, TikTok cyan), live embeds are **edited in place** with fresh viewer
 counts and thumbnails, and flip to a muted "ended" embed keeping the VOD
 link. The event kind (`upload` vs `live`) decides embed style — pass it
 explicitly (see [API](API.md#event-kinds)).
+
+## Chat: Discord (receiving)
+
+Needs the `discord-chat` extra (`websocket-client`). Setup, the privileged
+intent and the bridge notes are in [DISCORD_CHAT.md](DISCORD_CHAT.md). Every
+key goes through the usual secret chain (Doppler first, then the environment),
+as `DISCORD_<KEY>`.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `DISCORD_BOT_TOKEN` | Bot token (secret chain). Never logged | required |
+| `DISCORD_GUILD_ID` | Only hear this guild | all guilds the bot is in |
+| `DISCORD_CHANNEL_IDS` | Comma-separated channel ids to hear | all text channels the bot can see |
+| `DISCORD_MAX_EVENT_BYTES` | Largest inbound Gateway frame or message, in bytes. An event over it stops the receiver with one error naming this setting. Positive integer, at most 67108864; anything else fails closed | `2097152` (2 MiB) |
+| `DISCORD_MODERATOR_ROLE_IDS` | Comma-separated role ids that map to the moderator role | none (nobody is a moderator) |
 
 ## Social: Matrix
 

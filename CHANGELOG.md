@@ -101,6 +101,43 @@ All notable changes to hypeman-social. The format follows
   are refused; the bounded websocket reader is mandatory (probe at start, no
   stock-reader fallback, `websocket-client>=1.6.0,<2`); `expires_in` of zero or
   less counts as expired; `stop()` returns nothing, use `stopped_cleanly`.
+  A second review round: sends are refused during shared chat or when its state
+  is unknown (session events plus Get Shared Chat Session, no timer); refresh
+  callbacks run in order on one dispatcher thread; a failed recovery keeps its
+  cooldown and missing configuration gets the same secret-cache recovery; every
+  message id is remembered for the whole replay window and far-future or
+  malformed timestamps are refused; the bounded websocket reader is mandatory
+  (probe at start, no stock-reader fallback, `websocket-client>=1.6.0,<2`);
+  `expires_in` of zero or less counts as expired; `stop()` returns nothing, use
+  `stopped_cleanly`.
+- **Discord chat receiving** (`DiscordChat`, `CHAT_REGISTRY['discord']`): a
+  Gateway client (identify, heartbeat with ACK tracking, resume, bounded
+  reconnect backoff, invalid-session handling) that turns guild messages into
+  `ChatEvent`s, and a REST `send()` that never raises and respects Discord's
+  rate limits. Marks relayed (webhook or bot) messages `bridged`, flags the
+  bot's own as `is_self`, maps roles from configured ids only, and ignores DMs.
+  New `discord-chat` extra (`websocket-client`), also part of `all`. See
+  `docs/DISCORD_CHAT.md`.
+- **Discord chat hardening** (review round on the above): resume URLs and the
+  gateway URL are validated before the token is sent and handshake redirects
+  are off; inbound frames are capped at 2 MiB in encoded bytes before the payload
+  is read; stop/start cannot overlap workers and cancellation never sends
+  Identify; resumable reconnects no longer close with 1000; Identify spacing,
+  a daily budget and a backoff that survives READY; owner changes via
+  `GUILD_UPDATE`/`GUILD_DELETE`; transport errors logged by type only; replies
+  deduplicated with an enforced nonce; shared global and per-channel rate-limit
+  deadlines; `start()` heals a fatal close; invalid configured filters fail
+  closed.
+- **Discord chat hardening, second round**: handlers and the worker are fenced
+  with `except BaseException` (class name only in logs); settings are read as one
+  atomic snapshot and a reloaded different token never resumes the old session;
+  the reader's automatic close acknowledgement keeps a resumable session (4000
+  not 1000); the size-bounded reader is probed and the adapter fails closed
+  without it; a valid `GET /gateway/bot` answer is required before any fresh
+  Identify, spaced a flat 5 s; deadlines are re-read after every rate-limit wait;
+  striped per-channel send locks replace the evicting dict; new
+  `DISCORD_MAX_EVENT_BYTES` (default 2 MiB), and an event over it stops the
+  receiver instead of looping on replay.
 
 ## [0.3.4] — 2026-10-09
 
