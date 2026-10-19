@@ -33,7 +33,6 @@ Security notes that shaped the code:
 import collections
 import json
 import logging
-import queue
 import re
 import socket
 import struct
@@ -134,8 +133,6 @@ REVOCATION_STATUSES = frozenset({'user_removed', 'authorization_revoked', 'versi
 #: Drop codes safe to echo. Twitch does not document the full set of
 #: ``drop_reason.code`` values, so only values seen in practice are listed.
 DROP_CODES = frozenset({'automod_held'})
-SHARED_CHAT_TYPES = ('channel.shared_chat.begin', 'channel.shared_chat.update',
-                     'channel.shared_chat.end')
 
 REQUIRED_SCOPES = ('user:read:chat', 'user:write:chat')
 
@@ -490,13 +487,12 @@ class TwitchChat(ChatReceiver):
         # (the operator replaced credentials) from an unchanged, older one.
         self._loaded_pair: Optional[Tuple[str, str]] = None
         self._snapshot: Optional[_Validated] = None
-        # Persistence queue for on_token_refresh: generation-numbered, drained
-        # in order by one dispatcher thread, never under the auth lock.
-        self._callback_lock = threading.Lock()
-        self._refresh_queue: 'queue.Queue[Optional[Tuple[int, str, str]]]' = queue.Queue()
-        self._refresh_gen = 0
+        # on_token_refresh: a single latest-wins slot drained by one dispatcher
+        # thread, never under the auth lock. Only the newest pair is worth saving.
+        self._cb_cond = threading.Condition(threading.Lock())
+        self._cb_pending: Optional[Tuple[str, str]] = None
+        self._cb_closing = False
         self._dispatcher: Optional[threading.Thread] = None
-        self._dispatched_gen = 0
         self._last_attempt: Optional[float] = None
         self._next_recovery_at = 0.0
         self._auth_failed_at: Optional[float] = None
@@ -515,15 +511,8 @@ class TwitchChat(ChatReceiver):
         self._cap_logged = False
         self._reader_error_logged = False
         self._stopped_cleanly = True
-        # Shared chat session state: 'unknown' | 'active' | 'inactive'. Only
-        # 'inactive' lets send() through. ``_shared_live`` means the shared-chat
-        # EventSub subscriptions are up on the current connection, so events keep
-        # the state current; without it every send asks Twitch.
-        self._shared_state = 'unknown'
-        self._shared_live = False
-        self._shared_gen = 0
-        self._shared_synced_at = 0.0
-        self._shared_last_try = -1e18
+        # Serialises the shared-chat check and the POST that follows it.
+        self._send_lock = threading.Lock()
         self._sent_times: Deque[float] = collections.deque()
         self._send_blocked_until = 0.0
         self._last_thread_check = 0.0
@@ -650,40 +639,41 @@ class TwitchChat(ChatReceiver):
         return True
 
     def _enqueue_refresh(self, access: str, refresh: str) -> None:
-        """Queue a replacement pair for on_token_refresh, in generation order.
+        """Offer a replacement pair to on_token_refresh (latest wins).
 
-        Every successful refresh is queued (nothing is coalesced) and one
-        dispatcher thread runs the callbacks in order, so a slow callback blocks
-        neither the receiver nor a sender, and an older pair never runs after a
-        newer one.
+        One slot, one dispatcher thread: the newest pair is delivered at least
+        once and intermediate pairs may be skipped, an older pair is never
+        delivered after a newer one, memory is bounded by construction, and a
+        slow callback blocks neither the receiver nor a sender.
         """
         if self._on_token_refresh is None:
             return
-        with self._callback_lock:
-            self._refresh_gen += 1
-            self._refresh_queue.put((self._refresh_gen, access, refresh))
-            if self._dispatcher is None:
+        with self._cb_cond:
+            self._cb_pending = (access, refresh)
+            if self._dispatcher is None or not self._dispatcher.is_alive():
+                self._cb_closing = False
                 self._dispatcher = threading.Thread(
                     target=self._run_refresh_callbacks, name='twitch-token-persist', daemon=True)
                 self._dispatcher.start()
+            self._cb_cond.notify()
 
     def _run_refresh_callbacks(self) -> None:
         callback = self._on_token_refresh
         while True:
-            item = self._refresh_queue.get()
-            if item is None:
-                with self._callback_lock:
-                    if self._refresh_queue.empty():
-                        self._dispatcher = None  # decided under the lock that enqueue uses
-                        return
-                continue  # something was queued behind the stop marker
-            generation, access, refresh = item
-            if generation <= self._dispatched_gen or callback is None:
-                continue  # a stale generation never runs after a newer one
-            self._dispatched_gen = generation
+            with self._cb_cond:
+                while self._cb_pending is None and not self._cb_closing:
+                    self._cb_cond.wait()
+                item, self._cb_pending = self._cb_pending, None
+                if item is None:
+                    self._dispatcher = None  # decided under the lock enqueue uses
+                    return
             try:
-                callback(access, refresh)
-            except Exception as e:
+                if callback is not None:
+                    callback(item[0], item[1])
+            except BaseException as e:
+                # Class name only: the text and args of an exception raised by a
+                # callback holding tokens may contain them, and nothing may reach
+                # the thread's default excepthook (stderr).
                 logger.warning('Twitch refresh callback failed: %s', type(e).__name__)
 
     def _ensure_auth(self, force: bool = False) -> bool:
@@ -855,7 +845,6 @@ class TwitchChat(ChatReceiver):
                                    'finished stopping')
                 return
             self._stop.clear()
-            self._reset_shared_state()
             self._spawn()
 
     def _spawn(self) -> None:
@@ -903,24 +892,23 @@ class TwitchChat(ChatReceiver):
                 if self._thread is thread:
                     self._thread = None
             self._ws = None
-        self._reset_shared_state()
         self._stopped_cleanly = clean
 
     def _stop_dispatcher(self) -> bool:
-        """Let queued refresh callbacks finish, then end the dispatcher thread."""
-        with self._callback_lock:
+        """Let the dispatcher deliver the pending pair and end. False if it is
+        still running, or a pair is still waiting, after the timeout."""
+        with self._cb_cond:
             dispatcher = self._dispatcher
-            if dispatcher is None:
-                return True
-            self._refresh_queue.put(None)
-        if dispatcher is threading.current_thread():
-            return False
-        dispatcher.join(timeout=self._stop_timeout)
-        if dispatcher.is_alive():
+            self._cb_closing = True
+            self._cb_cond.notify()
+        if dispatcher is not None and dispatcher is not threading.current_thread():
+            dispatcher.join(timeout=self._stop_timeout)
+        with self._cb_cond:
+            stuck = self._dispatcher is not None or self._cb_pending is not None
+        if stuck:
             logger.warning('Twitch chat shutdown incomplete: a token persistence callback '
-                           'is still running')
-            return False
-        return True
+                           'is still running or a pair is still waiting')
+        return not stuck
 
     # ----- receive loop ---------------------------------------------------
 
@@ -999,24 +987,6 @@ class TwitchChat(ChatReceiver):
             keepalive = KEEPALIVE_SECONDS
         return sid, keepalive, session.get('reconnect_url')
 
-    def _create_subscription(self, body: Dict[str, Any]) -> Optional[int]:
-        """POST one EventSub subscription; the HTTP status, None if no response.
-        A 401 gets one forced re-auth and retry. Raises _AuthLost if auth is gone."""
-        for attempt in (0, 1):
-            snap = self._auth_snapshot()
-            if snap is None:
-                raise _AuthLost()
-            resp = self._request('post', f'{HELIX}/eventsub/subscriptions',
-                                 headers=self._auth_headers(snap), json=body)
-            if resp is None:
-                return None
-            if resp.status_code == 401 and attempt == 0:
-                if self._ensure_auth(force=True):
-                    continue
-                raise _AuthLost()
-            return int(resp.status_code)
-        return None
-
     def _subscribe(self, session_id: str) -> None:
         body = {
             'type': 'channel.chat.message', 'version': '1',
@@ -1024,95 +994,49 @@ class TwitchChat(ChatReceiver):
                           'user_id': self._creds['bot_user_id']},
             'transport': {'method': 'websocket', 'session_id': session_id},
         }
-        status = self._create_subscription(body)
-        if status is None:
-            raise _Transient('subscribe failed')
-        if status == 202:
-            return
-        logger.warning('Twitch chat subscription refused: HTTP %s', status)
-        raise _Transient('subscribe refused')
+        for attempt in (0, 1):
+            snap = self._auth_snapshot()
+            if snap is None:
+                raise _AuthLost()
+            resp = self._request('post', f'{HELIX}/eventsub/subscriptions',
+                                 headers=self._auth_headers(snap), json=body)
+            if resp is None:
+                raise _Transient('subscribe failed')
+            if resp.status_code == 202:
+                return
+            if resp.status_code == 401 and attempt == 0:
+                if self._ensure_auth(force=True):
+                    continue
+                raise _AuthLost()
+            logger.warning('Twitch chat subscription refused: HTTP %s', resp.status_code)
+            raise _Transient('subscribe refused')
 
-    def _subscribe_shared(self, session_id: str) -> bool:
-        """Subscribe to the shared-chat session begin/update/end events (version 1,
-        condition ``broadcaster_user_id``). True only when all three are up; if
-        not, the state cannot be trusted from events and every send asks Twitch."""
-        ok = True
-        for kind in SHARED_CHAT_TYPES:
-            body = {'type': kind, 'version': '1',
-                    'condition': {'broadcaster_user_id': self._broadcaster_id},
-                    'transport': {'method': 'websocket', 'session_id': session_id}}
-            status = self._create_subscription(body)
-            if status != 202:
-                logger.warning('Twitch shared-chat subscription refused: HTTP %s', status)
-                ok = False
-        return ok
+    def _session_clear(self) -> bool:
+        """Ask Twitch, right now, whether the channel is in a shared chat session.
 
-    # ----- shared chat session state --------------------------------------
-    #
-    # With a user access token Twitch delivers an outgoing message to every
-    # channel in a shared chat session and the local channel allowlist cannot
-    # stop that, so sends are refused unless the session state is known to be
-    # "not sharing". There is no timer: the state comes from the begin/update/end
-    # events, Get Shared Chat Session at start, after a reconnect and on the slow
-    # validation cadence, and anything uncertain counts as sharing.
-
-    def _reset_shared_state(self) -> None:
-        with self._lock:
-            self._shared_state = 'unknown'
-            self._shared_live = False
-            self._shared_gen += 1
-            self._shared_synced_at = 0.0
-
-    def _set_shared_state(self, state: str) -> None:
-        with self._lock:
-            self._shared_state = state
-            self._shared_gen += 1
-            self._shared_synced_at = self._clock()
-
-    def _resync_shared(self) -> str:
-        """Ask Twitch whether the channel is in a shared chat session."""
-        with self._lock:
-            generation = self._shared_gen
-            self._shared_last_try = self._clock()
-        state = 'unknown'
-        snap = self._auth_snapshot()
-        if snap is not None and self._broadcaster_id:
+        True only on a definite "no session". With a user access token Twitch
+        delivers an outgoing message to every channel of a shared session and the
+        channel allowlist cannot stop that, so an active session, an error, a
+        timeout, an unparseable answer or a 401 that one refresh did not fix all
+        refuse the send. Nothing is cached: every send asks.
+        """
+        for attempt in (0, 1):
+            snap = self._auth_snapshot()
+            if snap is None or not self._broadcaster_id:
+                return False
             resp = self._request('get', f'{HELIX}/shared_chat/session',
                                  headers=self._auth_headers(snap),
                                  params={'broadcaster_id': self._broadcaster_id})
-            state = self._shared_verdict(resp)
-        with self._lock:
-            if self._shared_gen == generation:  # an event that raced us wins
-                self._shared_state = state
-                if state != 'unknown':
-                    self._shared_synced_at = self._clock()
-            return self._shared_state
-
-    @staticmethod
-    def _shared_verdict(resp: Any) -> str:
-        try:
-            if resp is None or resp.status_code != 200:
-                return 'unknown'
-            data = resp.json().get('data')
-        except Exception:
-            return 'unknown'
-        if not isinstance(data, list):
-            return 'unknown'
-        return 'active' if data else 'inactive'
-
-    def _shared_chat_clear(self) -> bool:
-        """True only when the channel is known not to be in a shared chat session."""
-        with self._lock:
-            now = self._clock()
-            live, state = self._shared_live, self._shared_state
-            if live and state == 'active':
+            if resp is None:
                 return False
-            if (live and state == 'inactive'
-                    and now - self._shared_synced_at < 2 * VALIDATE_INTERVAL):
-                return True
-            if live and now - self._shared_last_try < ATTEMPT_COOLDOWN:
-                return False  # a recent resync failed; do not hammer Twitch
-        return self._resync_shared() == 'inactive'
+            try:
+                if resp.status_code == 401 and attempt == 0 and self._ensure_auth(force=True):
+                    continue
+                data = resp.json().get('data') if resp.status_code == 200 else None
+            except Exception:
+                return False
+            return isinstance(data, list) and not data
+        return False
 
     @staticmethod
     def _reconnect_url_ok(url: Any) -> bool:
@@ -1137,7 +1061,6 @@ class TwitchChat(ChatReceiver):
         """One connection, from connect to loss. True once it was subscribed."""
         if not self._reader_ok() or not self._resolve_channel():
             return False
-        self._reset_shared_state()
         ws = self._connect(f'{EVENTSUB_URL}?keepalive_timeout_seconds={KEEPALIVE_SECONDS}',
                            WELCOME_TIMEOUT)
         self._ws = ws
@@ -1152,18 +1075,13 @@ class TwitchChat(ChatReceiver):
                 return False
             try:
                 self._subscribe(sid)
-                shared_up = self._subscribe_shared(sid)
             except _AuthLost:
                 return False
             subscribed = True
-            with self._lock:
-                self._shared_live = shared_up
-            self._resync_shared()
             while not self._stop.is_set():
                 if not self._ensure_auth():
                     logger.warning('Twitch token no longer usable; closing the chat session')
                     return subscribed
-                self._maybe_resync_shared()
                 frame = self._recv(ws, keepalive + KEEPALIVE_GRACE)
                 if frame is None:
                     logger.warning('Twitch keepalive timeout; reconnecting')
@@ -1174,8 +1092,6 @@ class TwitchChat(ChatReceiver):
                 if new_url:
                     ws = self._follow_reconnect(ws, new_url)
                     keepalive = self._keepalive
-                    self._set_shared_state('unknown')  # new link: resync before trusting
-                    self._resync_shared()
             return subscribed
         except _Transient as e:
             logger.warning('Twitch chat link lost: %s', e)
@@ -1186,17 +1102,6 @@ class TwitchChat(ChatReceiver):
             except Exception as e:
                 logger.debug('Twitch websocket close failed: %s', type(e).__name__)
             self._ws = None
-            self._reset_shared_state()
-
-    def _maybe_resync_shared(self) -> None:
-        """Slow-cadence resync, and a retry of a failed one on the short cooldown."""
-        with self._lock:
-            now = self._clock()
-            due = (now - self._shared_synced_at >= VALIDATE_INTERVAL
-                   or (self._shared_state == 'unknown'
-                       and now - self._shared_last_try >= ATTEMPT_COOLDOWN))
-        if due:
-            self._resync_shared()
 
     def _follow_reconnect(self, old_ws: Any, url: str) -> Any:
         """Open the new link, wait for its welcome, then retire the old one."""
@@ -1286,11 +1191,6 @@ class TwitchChat(ChatReceiver):
             return None
         if str(event.get('broadcaster_user_id')) != str(self._broadcaster_id):
             return None
-        if subscription_type in SHARED_CHAT_TYPES:
-            # begin and update mean a session is running; end means it is not.
-            self._set_shared_state(
-                'inactive' if subscription_type == 'channel.shared_chat.end' else 'active')
-            return None
         if subscription_type != 'channel.chat.message':
             return None
         # Shared chat: Twitch delivers other participants' messages to this
@@ -1299,7 +1199,6 @@ class TwitchChat(ChatReceiver):
         # a user-token send during such a session would reach all of them.
         source = event.get('source_broadcaster_user_id')
         if source not in (None, '') and str(source) != str(self._broadcaster_id):
-            self._set_shared_state('active')  # direct evidence of a running session
             logger.debug('Twitch shared-chat message from another channel dropped')
             return None
         chat = event_to_chat_event(event, self._creds.get('bot_user_id', ''))
@@ -1354,9 +1253,6 @@ class TwitchChat(ChatReceiver):
         if not self._allow_command_prefix and has_command_prefix(message):
             logger.warning('Twitch send refused: message starts with a command prefix')
             return False
-        if not self._shared_chat_clear():
-            logger.warning('Twitch send refused: shared chat is active or its state is unknown')
-            return False
         with self._lock:
             if not self._rate_ok():
                 logger.debug('Twitch send skipped by the local rate limiter')
@@ -1366,18 +1262,26 @@ class TwitchChat(ChatReceiver):
         if reply_to_id:
             body['reply_parent_message_id'] = str(reply_to_id)
         resp: Any = None
-        for attempt in (0, 1):
-            snap = self._auth_snapshot()
-            if snap is None:
-                return False
-            body['sender_id'] = snap.bot_user_id
-            resp = self._request('post', f'{HELIX}/chat/messages',
-                                 headers=self._auth_headers(snap), json=body)
-            if resp is None:
-                return False
-            if resp.status_code == 401 and attempt == 0 and self._ensure_auth(force=True):
-                continue
-            break
+        # One lock around check-and-POST. A session that starts between the check
+        # and the POST is a race this API gives no way to close (only an app
+        # access token with for_source_only would).
+        with self._send_lock:
+            for attempt in (0, 1):
+                if not self._session_clear():  # asked again before a 401 retry
+                    logger.warning('Twitch send refused: shared chat is active or could '
+                                   'not be ruled out')
+                    return False
+                snap = self._auth_snapshot()
+                if snap is None:
+                    return False
+                body['sender_id'] = snap.bot_user_id
+                resp = self._request('post', f'{HELIX}/chat/messages',
+                                     headers=self._auth_headers(snap), json=body)
+                if resp is None:
+                    return False
+                if resp.status_code == 401 and attempt == 0 and self._ensure_auth(force=True):
+                    continue
+                break
         if resp.status_code == 429:
             with self._lock:
                 self._send_blocked_until = self._clock() + self._retry_after(resp)

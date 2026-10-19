@@ -91,15 +91,16 @@ All notable changes to hypeman-social. The format follows
   handshake redirects and non-Twitch reconnect URLs are refused; control
   characters and `/` or `.` command prefixes are refused on send; notifications
   older than ten minutes are dropped.
-  A second review round: sends are refused during shared chat or when its state
-  is unknown (session events plus Get Shared Chat Session, no timer); refresh
-  callbacks run in order on one dispatcher thread; a failed recovery keeps its
-  cooldown and missing configuration gets the same secret-cache recovery; every
-  message id is remembered for the whole replay window and far-future or
-  malformed timestamps are refused; the bounded websocket reader is mandatory
-  (probe at start, no stock-reader fallback, `websocket-client>=1.6.0,<2`);
-  `expires_in` of zero or less counts as expired; `stop()` returns nothing, use
-  `stopped_cleanly`.
+  A second review round: every send asks Twitch (Get Shared Chat Session)
+  right before the POST and is refused if a session is active or the answer is
+  unknown (no cache, no timer, no extra subscriptions); `on_token_refresh` gets
+  the latest pair through one latest-wins slot on a dispatcher thread, with
+  every exception contained; a failed recovery keeps its cooldown and missing
+  configuration gets the same secret-cache recovery; every message id is
+  remembered for the whole replay window and far-future or malformed timestamps
+  are refused; the bounded websocket reader is mandatory (probe at start, no
+  stock-reader fallback, `websocket-client>=1.6.0,<2`); `expires_in` of zero or
+  less counts as expired; `stop()` returns nothing, use `stopped_cleanly`.
 
 ## [0.3.4] — 2026-10-09
 

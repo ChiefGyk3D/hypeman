@@ -1379,211 +1379,159 @@ def fresh_reader_probe(monkeypatch):
     monkeypatch.setattr(tw, '_reader_cache', None)
 
 
-def shared_frame(kind, mid, broadcaster='111'):
-    return {'metadata': {'message_type': 'notification', 'message_id': mid,
-                         'message_timestamp': iso(),
-                         'subscription_type': f'channel.shared_chat.{kind}'},
-            'payload': {'event': {'session_id': 'sess', 'broadcaster_user_id': broadcaster,
-                                  'host_broadcaster_user_id': broadcaster,
-                                  'participants': [{'broadcaster_user_id': broadcaster}]}}}
-
-
-def live(chat, state='inactive'):
-    """Pretend the shared-chat subscriptions are up and the state was just synced."""
-    chat._shared_live = True
-    chat._shared_state = state
-    chat._shared_synced_at = chat._clock()
-
-
 def session_calls(http):
     return [c for c in http.calls if c[1].endswith('/shared_chat/session')]
 
 
-# ----- A. shared chat: authoritative state, fail closed ----------------------
-
-def test_shared_chat_begin_update_end_events_gate_sends(http, clock):
-    chat, got = primed(http, clock)
-    live(chat)
-    assert chat.send('111', 'before') is True
-    chat._dispatch(shared_frame('begin', 'b1'))
-    clock.now += 2
-    assert chat.send('111', 'during') is False
-    chat._dispatch(shared_frame('update', 'u1'))
-    clock.now += 2
-    assert chat.send('111', 'still during') is False
-    assert len(http.posts('/chat/messages')) == 1
-    chat._dispatch(shared_frame('end', 'e1'))
-    clock.now += 2
-    assert chat.send('111', 'after') is True
+def in_session():
+    return Resp(200, {'data': [{'session_id': 's', 'host_broadcaster_id': '111',
+                                'participants': [{'broadcaster_id': '111'},
+                                                 {'broadcaster_id': '999'}]}]})
 
 
-def test_shared_chat_event_for_another_broadcaster_is_ignored(http, clock):
-    chat, got = primed(http, clock)
-    live(chat)
-    chat._dispatch(shared_frame('begin', 'b1', broadcaster='999'))
-    assert chat._shared_state == 'inactive'
+NOT_IN_SESSION = Resp(200, {'data': []})
 
 
-def test_there_is_no_shared_chat_timer(http, clock):
-    assert not hasattr(tw, 'SHARED_CHAT_QUIET')
-    chat, got = primed(http, clock)
-    live(chat)
-    chat._dispatch(notification(chat_event(source_broadcaster_user_id='999')))
-    assert chat._shared_state == 'active'  # a foreign-source message is evidence
-    for hours in (1, 5, 24):
-        clock.now += hours * 3600
-        live_synced = chat._shared_synced_at
+class Unparseable(Resp):
+    def json(self):
+        raise ValueError('not json')
+
+
+# ----- A. every send asks Twitch about shared chat, right before the POST -------
+
+def test_active_session_refuses_the_send(http, clock, caplog):
+    http.on('get', '/shared_chat/session', in_session())
+    chat = make(http, clock)
+    with caplog.at_level(logging.DEBUG):
         assert chat.send('111', 'hi') is False
-        assert chat._shared_synced_at == live_synced
-    chat._dispatch(shared_frame('end', 'e1'))
-    clock.now += 2
+    assert http.posts('/chat/messages') == []
+    assert 'shared chat is active or could not be ruled out' in caplog.text
+
+
+def test_no_session_sends(http, clock):
+    chat = make(http, clock)
+    assert chat.send('111', 'hi') is True
+    assert session_calls(http)[0][2]['params'] == {'broadcaster_id': '111'}
+    assert session_calls(http)[0][2]['headers']['Authorization'] == f'Bearer {ACCESS}'
+
+
+@pytest.mark.parametrize('answer', [
+    Resp(500), Resp(404), Resp(403), RuntimeError('SYNTHETIC-SECRET'), TimeoutError('slow'),
+    Resp(200, {'unexpected': True}), Resp(200, {'data': 'nope'}), Resp(200, {'data': None}),
+    Resp(200, [1]), Unparseable(200),
+])
+def test_unknown_answers_refuse_the_send(http, clock, answer):
+    http.on('get', '/shared_chat/session', answer)
+    assert make(http, clock).send('111', 'hi') is False
+    assert http.posts('/chat/messages') == []
+
+
+def test_the_check_happens_on_every_send_and_right_before_the_post(http, clock):
+    http.on('get', '/shared_chat/session', NOT_IN_SESSION, in_session(), NOT_IN_SESSION)
+    chat = make(http, clock)
+    results = []
+    for _ in range(3):
+        clock.now += 2
+        results.append(chat.send('111', 'hi'))
+    assert results == [True, False, True]
+    assert len(session_calls(http)) == 3
+    order = [c[1].rsplit('/', 1)[-1] for c in http.calls
+             if c[1].endswith(('/session', '/messages'))]
+    assert order == ['session', 'messages', 'session', 'session', 'messages']
+
+
+def test_a_401_retry_asks_again_before_the_second_post(http, clock):
+    http.on('get', '/oauth2/validate', valid_body(), Resp(401), valid_body())
+    http.on('post', '/oauth2/token', Resp(200, {'access_token': NEW_ACCESS,
+                                                 'refresh_token': NEW_REFRESH}))
+    http.on('post', '/chat/messages', Resp(401), Resp(200, {'data': [{'is_sent': True}]}))
+    http.on('get', '/shared_chat/session', NOT_IN_SESSION, in_session())
+    chat = make(http, clock)
+    assert chat.send('111', 'hi') is False   # a session began while the token was refreshed
+    assert len(session_calls(http)) == 2
+    assert len(http.posts('/chat/messages')) == 1
+
+
+def test_a_401_retry_that_stays_clear_posts_again(http, clock):
+    http.on('get', '/oauth2/validate', valid_body(), Resp(401), valid_body())
+    http.on('post', '/oauth2/token', Resp(200, {'access_token': NEW_ACCESS,
+                                                 'refresh_token': NEW_REFRESH}))
+    http.on('post', '/chat/messages', Resp(401), Resp(200, {'data': [{'is_sent': True}]}))
+    chat = make(http, clock)
+    assert chat.send('111', 'hi') is True
+    assert len(session_calls(http)) == 2 and len(http.posts('/chat/messages')) == 2
+    assert session_calls(http)[1][2]['headers']['Authorization'] == f'Bearer {NEW_ACCESS}'
+
+
+def test_a_401_on_the_check_gets_one_refresh_and_then_refuses(http, clock):
+    http.on('get', '/oauth2/validate', valid_body(), Resp(401), valid_body())
+    http.on('post', '/oauth2/token', Resp(200, {'access_token': NEW_ACCESS,
+                                                 'refresh_token': NEW_REFRESH}))
+    http.on('get', '/shared_chat/session', Resp(401))
+    chat = make(http, clock)
+    assert chat.send('111', 'hi') is False
+    assert len(session_calls(http)) == 2
+    assert len(http.posts('/oauth2/token')) == 1
+    assert http.posts('/chat/messages') == []
+
+
+def test_a_401_on_the_check_that_one_refresh_fixes_sends(http, clock):
+    http.on('get', '/oauth2/validate', valid_body(), Resp(401), valid_body())
+    http.on('post', '/oauth2/token', Resp(200, {'access_token': NEW_ACCESS,
+                                                 'refresh_token': NEW_REFRESH}))
+    http.on('get', '/shared_chat/session', Resp(401), NOT_IN_SESSION)
+    chat = make(http, clock)
     assert chat.send('111', 'hi') is True
 
 
-def test_a_quiet_partner_does_not_reopen_sends(http, clock):
+def test_check_and_post_are_serialised(http, clock, monkeypatch):
+    monkeypatch.setattr(tw, 'SEND_MIN_INTERVAL', 0.0)
+    entered, release = threading.Event(), threading.Event()
+
+    class Held(Resp):
+        def json(self):
+            entered.set()
+            assert release.wait(5)
+            return self._body
+
+    http.on('get', '/shared_chat/session', Held(200, {'data': []}), NOT_IN_SESSION)
+    chat = make(http, clock)
+    assert chat.is_available() is True
+    first = threading.Thread(target=lambda: chat.send('111', 'one'), daemon=True)
+    second = threading.Thread(target=lambda: chat.send('111', 'two'), daemon=True)
+    first.start()
+    assert entered.wait(3)
+    second.start()
+    time.sleep(0.3)
+    assert len(session_calls(http)) == 1       # the second send waits for the first
+    assert http.posts('/chat/messages') == []
+    release.set()
+    first.join(5)
+    second.join(5)
+    assert len(session_calls(http)) == 2 and len(http.posts('/chat/messages')) == 2
+
+
+def test_no_shared_chat_subscriptions_and_no_background_polling(http, clock):
+    chat = make(http, clock, connect=lambda u, t: FakeWs([welcome(), notification(chat_event())]))
+    chat.start(lambda e: None)
+    assert wait_for(lambda: http.posts('/eventsub/subscriptions'))
+    time.sleep(0.2)
+    chat.stop()
+    assert {c[2]['json']['type'] for c in http.posts('/eventsub/subscriptions')} == \
+        {'channel.chat.message'}
+    assert session_calls(http) == []
+    for name in ('SHARED_CHAT_TYPES', 'SHARED_CHAT_QUIET'):
+        assert not hasattr(tw, name)
+
+
+def test_a_foreign_source_message_does_not_change_the_send_decision(http, clock):
     chat, got = primed(http, clock)
-    live(chat, 'active')
-    clock.now += 11 * 60  # longer than any plausible quiet timer
-    assert chat.send('111', 'hi') is False
-    assert http.posts('/chat/messages') == []
+    chat._dispatch(notification(chat_event(source_broadcaster_user_id='999')))
+    assert got == []
+    assert chat.send('111', 'hi') is True     # only Twitch's own answer decides
 
 
-def test_startup_while_already_sharing_resyncs_and_refuses(http, clock):
-    http.on('get', '/shared_chat/session', Resp(200, {'data': [
-        {'session_id': 's', 'host_broadcaster_id': '111',
-         'participants': [{'broadcaster_id': '111'}, {'broadcaster_id': '999'}]}]}))
-    chat = make(http, clock, connect=lambda u, t: FakeWs([welcome()]))
-    chat.start(lambda e: None)
-    assert wait_for(lambda: chat._shared_state == 'active')
-    assert chat.send('111', 'hi') is False
-    assert http.posts('/chat/messages') == []
-    chat.stop()
-    types = {c[2]['json']['type']: c[2]['json'] for c in http.posts('/eventsub/subscriptions')}
-    assert set(types) == {'channel.chat.message', 'channel.shared_chat.begin',
-                          'channel.shared_chat.update', 'channel.shared_chat.end'}
-    for kind in ('begin', 'update', 'end'):
-        sub = types[f'channel.shared_chat.{kind}']
-        assert sub['version'] == '1'
-        assert sub['condition'] == {'broadcaster_user_id': '111'}
-    assert session_calls(http)[0][2]['params'] == {'broadcaster_id': '111'}
-
-
-@pytest.mark.parametrize('failure', [Resp(500), Resp(401), RuntimeError('SYNTHETIC-SECRET'),
-                                     Resp(200, {'unexpected': True}),
-                                     Resp(200, {'data': 'nope'})])
-def test_failed_resync_fails_closed_without_a_receiver(http, clock, failure):
-    http.on('get', '/shared_chat/session', failure)
-    chat = make(http, clock)
-    assert chat.send('111', 'hi') is False
-    assert http.posts('/chat/messages') == []
-
-
-def test_without_a_receiver_every_send_asks_twitch(http, clock):
-    http.on('get', '/shared_chat/session',
-            Resp(200, {'data': [{'session_id': 's'}]}), Resp(200, {'data': []}))
-    chat = make(http, clock)
-    assert chat.send('111', 'a') is False
-    clock.now += 2
-    assert chat.send('111', 'b') is True
-    assert len(session_calls(http)) == 2
-
-
-def test_failed_resync_with_a_receiver_is_retried_on_a_cooldown(http, clock):
-    http.on('get', '/shared_chat/session', Resp(500), Resp(200, {'data': []}))
-    chat, _ = primed(http, clock)
-    live(chat, 'unknown')
-    assert chat.send('111', 'a') is False
-    assert chat.send('111', 'b') is False   # inside the cooldown: no new request
-    assert len(session_calls(http)) == 1
-    clock.now += tw.ATTEMPT_COOLDOWN + 1
-    assert chat.send('111', 'c') is True
-    assert len(session_calls(http)) == 2
-
-
-def test_inactive_state_goes_stale_and_is_rechecked(http, clock):
-    http.on('get', '/shared_chat/session', Resp(200, {'data': [{'session_id': 's'}]}))
-    chat, _ = primed(http, clock)
-    live(chat)
-    clock.now += 2 * tw.VALIDATE_INTERVAL + 5
-    assert chat.send('111', 'hi') is False  # the old "inactive" is not trusted forever
-    assert chat._shared_state == 'active'
-
-
-def test_reconnect_resets_the_state_then_resyncs(http, clock):
-    seen_at_resync = []
-
-    class Spy(Resp):
-        def json(self):
-            seen_at_resync.append(chat._shared_state)
-            return self._body
-
-    http.on('get', '/shared_chat/session', Spy(200, {'data': []}), Spy(200, {'data': []}))
-    url = 'wss://eventsub.wss.twitch.tv/ws?reconnect=1'
-    reconnect = {'metadata': {'message_type': 'session_reconnect'},
-                 'payload': {'session': {'reconnect_url': url}}}
-    conns = [FakeWs([welcome(), reconnect]), FakeWs([welcome(sid='sess2')])]
-    chat = make(http, clock, connect=lambda u, t: conns.pop(0) if conns else FakeWs())
-    chat.start(lambda e: None)
-    assert wait_for(lambda: len(session_calls(http)) >= 2)
-    chat.stop()
-    assert seen_at_resync[:2] == ['unknown', 'unknown']
-    assert len(chat_subs(http)) == 1  # a reconnect keeps the subscriptions
-
-
-def test_shared_state_is_resynced_on_the_slow_cadence(http, clock):
-    class Keepalives(FakeWs):
-        def recv(self):
-            if self.closed:
-                raise ConnectionError('closed')
-            if self.q.empty():
-                time.sleep(0.01)
-                return json.dumps({'metadata': {'message_type': 'session_keepalive'}})
-            return super().recv()
-
-    chat = make(http, clock, connect=lambda u, t: Keepalives([welcome()]))
-    chat.start(lambda e: None)
-    assert wait_for(lambda: len(session_calls(http)) == 1)
-    time.sleep(0.1)
-    assert len(session_calls(http)) == 1       # nothing is due yet
-    clock.now += tw.VALIDATE_INTERVAL + 1
-    assert wait_for(lambda: len(session_calls(http)) >= 2)
-    chat.stop()
-
-
-def test_stop_resets_the_session_state(http, clock):
-    chat = make(http, clock, connect=lambda u, t: FakeWs([welcome()]))
-    chat.start(lambda e: None)
-    assert wait_for(lambda: chat._shared_live)
-    chat.stop()
-    assert chat._shared_live is False and chat._shared_state == 'unknown'
-
-
-def test_shared_subscription_refused_still_fails_closed(http, clock):
-    live_at_resync = []
-
-    class Spy(Resp):
-        def json(self):
-            live_at_resync.append(chat._shared_live)
-            return self._body
-
-    http.on('post', '/eventsub/subscriptions', Resp(202), Resp(403), Resp(403), Resp(403))
-    http.on('get', '/shared_chat/session', Spy(200, {'data': [{'session_id': 's'}]}))
-    chat = make(http, clock, connect=lambda u, t: FakeWs([welcome()]))
-    chat.start(lambda e: None)
-    assert wait_for(lambda: live_at_resync)
-    chat.stop()
-    assert live_at_resync[0] is False  # events cannot be trusted without all three
-    assert chat.send('111', 'hi') is False
-
-
-def test_stop_resets_even_when_no_connection_is_running(http, clock):
-    chat, _ = primed(http, clock)
-    live(chat, 'inactive')
-    chat.stop()
-    assert chat._shared_live is False and chat._shared_state == 'unknown'
-
-
-# ----- B. refresh persistence queue --------------------------------------------
+# ----- B. refresh persistence: one latest-wins slot ------------------------------
 
 def refreshing(http, clock, callback, rounds=3):
     http.on('get', '/oauth2/validate', valid_body(), *([Resp(401), valid_body()] * rounds))
@@ -1599,7 +1547,7 @@ def run_in_thread(fn, seconds=3.0):
     return not t.is_alive()
 
 
-def test_slow_callback_blocks_nothing_and_every_pair_arrives_in_order(http, clock):
+def test_blocked_callback_never_blocks_and_the_latest_pair_arrives(http, clock):
     gate, entered, seen = threading.Event(), threading.Event(), []
 
     def callback(access, refresh):
@@ -1615,9 +1563,40 @@ def test_slow_callback_blocks_nothing_and_every_pair_arrives_in_order(http, cloc
     clock.now += 2
     assert run_in_thread(lambda: chat.send('111', 'hi'))  # the auth lock is free
     gate.set()
-    assert wait_for(lambda: len(seen) == 3)
-    assert seen == [('A1', 'R1'), ('A2', 'R2'), ('A3', 'R3')]
+    assert wait_for(lambda: len(seen) == 2)
+    # The first pair was already in flight; the second was overwritten by the third.
+    assert seen == [('A1', 'R1'), ('A3', 'R3')]
     chat.stop()
+    assert chat.stopped_cleanly is True
+
+
+def test_the_slot_never_grows_behind_a_blocked_callback(http, clock):
+    gate, entered = threading.Event(), threading.Event()
+
+    def callback(access, refresh):
+        entered.set()
+        gate.wait(5)
+
+    chat = refreshing(http, clock, callback, rounds=40)
+    chat.is_available()
+    chat._ensure_auth(force=True)
+    assert entered.wait(3)
+    for _ in range(39):
+        chat._ensure_auth(force=True)
+    assert chat._cb_pending == ('A40', 'R40')   # one pair, the newest
+    gate.set()
+    chat.stop()
+
+
+def test_an_older_pair_is_never_delivered_after_a_newer_one(http, clock):
+    seen = []
+    chat = refreshing(http, clock, lambda a, r: seen.append(a), rounds=12)
+    chat.is_available()
+    for _ in range(12):
+        chat._ensure_auth(force=True)
+    chat.stop()
+    numbers = [int(a[1:]) for a in seen]
+    assert numbers == sorted(numbers) and numbers[-1] == 12
 
 
 def test_callback_runs_on_one_dispatcher_thread_off_the_caller(http, clock):
@@ -1627,46 +1606,66 @@ def test_callback_runs_on_one_dispatcher_thread_off_the_caller(http, clock):
     chat._ensure_auth(force=True)
     chat.stop()
     assert len(names) == 1 and names[0] != threading.current_thread().name
-    assert len(set(names)) == 1
 
 
 def test_a_failing_callback_does_not_stop_later_ones(http, clock):
-    seen = []
+    seen, first_done = [], threading.Event()
 
     def callback(access, refresh):
         seen.append(access)
         if access == 'A1':
+            first_done.set()
             raise RuntimeError('persist failed')
 
     chat = refreshing(http, clock, callback)
     chat.is_available()
     chat._ensure_auth(force=True)
+    assert first_done.wait(3)
     chat._ensure_auth(force=True)
     chat.stop()
     assert seen == ['A1', 'A2']
 
 
-def test_a_stale_generation_never_runs_after_a_newer_one(http, clock):
-    seen, entered, gate = [], threading.Event(), threading.Event()
+def test_base_exception_from_the_callback_is_contained(http, clock, caplog, capsys):
+    seen, first_done = [], threading.Event()
 
     def callback(access, refresh):
-        entered.set()
-        gate.wait(5)
         seen.append(access)
+        if access == 'A1':
+            first_done.set()
+            raise BaseException(f'{access} {refresh} {NEW_REFRESH}')
 
-    chat = refreshing(http, clock, callback, rounds=1)
+    chat = refreshing(http, clock, callback)
+    with caplog.at_level(logging.DEBUG):
+        chat.is_available()
+        chat._ensure_auth(force=True)
+        assert first_done.wait(3)
+        assert wait_for(lambda: chat._dispatcher is not None and chat._cb_pending is None)
+        assert chat._dispatcher.is_alive()               # the dispatcher survived
+        chat._ensure_auth(force=True)
+        chat.stop()
+    assert seen == ['A1', 'A2']
+    captured = capsys.readouterr()
+    for blob in (caplog.text, captured.err, captured.out):
+        assert 'A1' not in blob and 'R1' not in blob and NEW_REFRESH not in blob
+    assert 'BaseException' in caplog.text
+
+
+def test_a_dead_dispatcher_is_restarted_by_the_next_refresh(http, clock):
+    seen = []
+    chat = refreshing(http, clock, lambda a, r: seen.append(a))
     chat.is_available()
+    corpse = threading.Thread(target=lambda: None)
+    corpse.start()
+    corpse.join()
+    chat._dispatcher = corpse
     chat._ensure_auth(force=True)
-    assert entered.wait(3)  # generation 1 is running
-    with chat._callback_lock:
-        chat._refresh_queue.put((9, 'NEWER', 'r'))
-        chat._refresh_queue.put((4, 'STALE', 'r'))
-    gate.set()
+    assert wait_for(lambda: seen == ['A1'])
+    assert chat._dispatcher is not corpse
     chat.stop()
-    assert seen == ['A1', 'NEWER']
 
 
-def test_stop_joins_the_dispatcher_and_reports_a_stuck_callback(http, clock, caplog):
+def test_stop_reports_a_stuck_callback(http, clock, caplog):
     gate, entered = threading.Event(), threading.Event()
 
     def callback(access, refresh):
@@ -1678,7 +1677,8 @@ def test_stop_joins_the_dispatcher_and_reports_a_stuck_callback(http, clock, cap
     chat.is_available()
     chat._ensure_auth(force=True)
     assert entered.wait(3)
-    dispatcher = chat._dispatcher
+    dispatcher = chat._dispatcher               # still running; nothing is waiting
+    assert chat._cb_pending is None
     with caplog.at_level(logging.WARNING):
         chat.stop()
     assert chat.stopped_cleanly is False and 'incomplete' in caplog.text
@@ -1687,13 +1687,21 @@ def test_stop_joins_the_dispatcher_and_reports_a_stuck_callback(http, clock, cap
     assert not dispatcher.is_alive()
 
 
-def test_dispatcher_is_gone_after_a_clean_stop(http, clock):
-    chat = refreshing(http, clock, lambda a, r: None, rounds=1)
+def test_stop_reports_a_pair_that_is_still_waiting(http, clock):
+    chat = make(http, clock, on_token_refresh=lambda a, r: None)
+    chat._cb_pending = ('x', 'y')               # nobody is draining it
+    chat.stop()
+    assert chat.stopped_cleanly is False
+
+
+def test_stop_drains_and_ends_the_dispatcher(http, clock):
+    seen = []
+    chat = refreshing(http, clock, lambda a, r: seen.append(a), rounds=1)
     chat.is_available()
     chat._ensure_auth(force=True)
     dispatcher = chat._dispatcher
     chat.stop()
-    assert chat.stopped_cleanly is True and not dispatcher.is_alive()
+    assert seen == ['A1'] and chat.stopped_cleanly is True and not dispatcher.is_alive()
 
 
 # ----- C. recovery cooldown -----------------------------------------------------
