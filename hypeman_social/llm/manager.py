@@ -39,6 +39,12 @@ def _normalize_for_dedup(message: str) -> str:
     return ' '.join(text.lower().split())
 
 
+def canonical_provider_name(name: str) -> str:
+    """Lower-case, trimmed, with aliases folded ('anthropic' is 'claude')."""
+    name = (name or '').strip().lower()
+    return 'claude' if name == 'anthropic' else name
+
+
 def build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
     """
     Instantiate a provider by name ('ollama', 'gemini', 'claude' or 'openai').
@@ -198,17 +204,20 @@ class LLMManager:
 
         Accepts one name or a comma-separated chain. The primary is filtered
         out so listing it twice is harmless, and duplicates are dropped while
-        preserving the order given.
+        preserving the order given (first spelling wins). Aliases are folded for
+        the comparison, so 'anthropic' and 'claude' count as one provider.
         """
         raw = get_config('LLM', 'fallback_provider', default='') or ''
         seen, names = set(), []
+        primary = canonical_provider_name(primary_name)
 
         for candidate in raw.split(','):
             name = candidate.strip().lower()
-            if not name or name == 'none' or name == primary_name.strip().lower():
+            canonical = canonical_provider_name(name)
+            if not canonical or canonical == 'none' or canonical == primary:
                 continue
-            if name not in seen:
-                seen.add(name)
+            if canonical not in seen:
+                seen.add(canonical)
                 names.append(name)
 
         return names

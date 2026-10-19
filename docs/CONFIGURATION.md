@@ -124,6 +124,17 @@ not spent on hidden reasoning.
 | `LLM_MODEL` | Model name shared by all providers | provider default |
 | `LLM_OLLAMA_MODEL` / `LLM_GEMINI_MODEL` / `LLM_CLAUDE_MODEL` / `LLM_OPENAI_MODEL` | Per-provider model; wins over `LLM_MODEL`. Needed whenever primary and fallback run different model names | provider default |
 
+**Claude and OpenAI read only their own namespace.** Every setting of those two
+providers (`LLM_CLAUDE_*`, `LLM_OPENAI_*`, plus the shared `LLM_MODEL`) is looked
+up by that exact name, Doppler first and then the environment. Unlike the
+other providers, the bare names (`OPENAI_BASE_URL`, `OPENAI_MODEL`,
+`CLAUDE_MODEL`, `CLAUDE_EFFORT`, ...) are ignored, so a variable set for other
+tooling cannot redirect the endpoint that receives your API key. `claude` and
+`anthropic` name the same provider, so listing both in
+`LLM_FALLBACK_PROVIDER` builds one client. A malformed number
+(`LLM_*_TIMEOUT`, `LLM_*_RATE_LIMIT`) logs a warning naming the setting and
+uses the default; it never stops startup.
+
 The manager keeps re-probing a downed primary in the background and switches
 back automatically when it recovers — you stop paying for the cloud fallback
 the moment your local box is back.
@@ -204,7 +215,7 @@ Install extra: `hypeman-social[openai]`. Uses the Responses API.
 | `LLM_OPENAI_SYSTEM_PROMPT` | Sent as `instructions` | *(none)* |
 | `LLM_OPENAI_REASONING_EFFORT` | `none`, `low`, `medium`, `high`, `xhigh`, `max`, or `omit` for the model default | `low` |
 | `LLM_OPENAI_TIMEOUT` | Per-request timeout, seconds | `30` |
-| `LLM_OPENAI_BASE_URL` | Only for an OpenAI-compatible gateway; unset uses OpenAI | *(none)* |
+| `LLM_OPENAI_BASE_URL` | Only for an OpenAI-compatible gateway; unset uses OpenAI. Must be `https` (plain `http` only for `localhost`/loopback) with no user info, query or fragment; anything else fails authentication and the key is never attached to it | *(none)* |
 | `LLM_OPENAI_RATE_LIMIT` | Client-side requests/minute self-throttle; `0` disables | `60` |
 
 Requests are sent with `store: false`, and `temperature`/`top_p` are not sent
@@ -216,7 +227,11 @@ check the OpenAI pricing page before committing a budget.
 **Structured output.** `OpenAILLM.generate_structured(prompt, schema, name)`
 sends a strict JSON schema and returns the parsed object, or `None`. `None`
 covers a model refusal, an incomplete (truncated) response, text that is not
-JSON, a non-object, and a missing `required` key. It never repairs or guesses,
+JSON (duplicate keys, `NaN` and `Infinity` count as invalid), and any
+mismatch with your schema, checked locally: `type`, `properties`, `required`,
+`additionalProperties`, `enum` and `items`. A schema using any other keyword
+(`pattern`, `minimum`, `oneOf`, ...) is refused before the call, because the
+result could not be verified. It never repairs or guesses,
 so a safety classifier should treat `None` as "no verdict" and fail closed.
 It shares availability, throttling, retry and error handling with
 `generate()`. Strict mode requires `additionalProperties: false` and every

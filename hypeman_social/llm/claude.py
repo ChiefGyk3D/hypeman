@@ -19,8 +19,9 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from hypeman_social.config import get_bool_config, get_config, get_secret
-from hypeman_social.llm._cloud import RateLimiter, classify_sdk_error
+from hypeman_social.config import get_secret
+from hypeman_social.config.config import get_exact_config
+from hypeman_social.llm._cloud import RateLimiter, classify_sdk_error, cloud_setting, parse_number
 from hypeman_social.llm.base import BaseLLM
 from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
@@ -50,22 +51,32 @@ class ClaudeLLM(BaseLLM):
         self.model: Optional[str] = None
         self.api_key: Optional[str] = None
 
+        # Every setting below is read from its LLM_CLAUDE_* name only (see
+        # cloud_setting): a bare CLAUDE_MODEL or CLAUDE_EFFORT in the ambient
+        # environment, set for other Claude tooling, must not win here.
         # Persona/rules prefix. Identical across calls so it can be cached.
-        self.system_prompt = get_config('LLM', 'claude_system_prompt', default='') or ''
-        self.enable_prompt_cache = get_bool_config('LLM', 'claude_prompt_cache', default=True)
+        self.system_prompt = cloud_setting('CLAUDE', 'system_prompt', '') or ''
+        self.enable_prompt_cache = (
+            cloud_setting('CLAUDE', 'prompt_cache', 'true') or 'true'
+        ).strip().lower() in ('true', '1', 'yes', 'on', 'enabled')
         # '5m' (default, 1.25x write) or '1h' (2x write, for sparse traffic).
-        self.cache_ttl = get_config('LLM', 'claude_cache_ttl', default='5m')
-        self.timeout = float(get_config('LLM', 'claude_timeout', default='30'))
-        # Not 'claude_effort': get_config tries the bare key CLAUDE_EFFORT first,
-        # and that name is already used by other Claude tooling. 'omit' (an empty
-        # value counts as unset) leaves the model's own default in place.
-        self.effort = get_config('LLM', 'claude_effort_level', default='low').strip().lower()
-        self.thinking = (get_config('LLM', 'claude_thinking', default='auto') or 'auto').lower()
-        self.limiter = RateLimiter(int(get_config('LLM', 'claude_rate_limit', default='50')))
+        self.cache_ttl = cloud_setting('CLAUDE', 'cache_ttl', '5m')
+        self.timeout = parse_number(
+            'LLM_CLAUDE_TIMEOUT', cloud_setting('CLAUDE', 'timeout'), 30.0)
+        # 'omit' (an empty value counts as unset) leaves the model's own default in place.
+        self.effort = cloud_setting('CLAUDE', 'effort_level', 'low').strip().lower()
+        self.thinking = (cloud_setting('CLAUDE', 'thinking', 'auto') or 'auto').lower()
+        self.limiter = RateLimiter(parse_number(
+            'LLM_CLAUDE_RATE_LIMIT', cloud_setting('CLAUDE', 'rate_limit'), 50,
+            integer=True, allow_zero=True))
 
     @property
     def rate_limit(self) -> int:
         return self.limiter.per_minute
+
+    def provider_config(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """LLM_CLAUDE_<KEY>, then the shared LLM_<KEY>; never a bare ambient name."""
+        return cloud_setting('CLAUDE', key) or get_exact_config(f'LLM_{key}'.upper(), default)
 
     def set_system_prompt(self, text: str) -> None:
         """Set the stable persona/rules prefix that gets the cache breakpoint."""
@@ -176,10 +187,16 @@ class ClaudeLLM(BaseLLM):
 
         self.limiter.wait()
 
+        # Classify inside the handler, raise outside it: raising in the handler
+        # would attach the credential-bearing SDK error as __context__, and
+        # `from None` only hides it from formatted tracebacks.
+        failure: Optional[str] = None
         try:
             response = self.client.messages.create(**self._build_request(prompt, max_tokens))
         except Exception as e:
-            raise RuntimeError(classify_sdk_error(e)) from None
+            failure = classify_sdk_error(e)
+        if failure is not None:
+            raise RuntimeError(failure)
 
         # A safety decline is a normal 200; it is "no answer", not an error.
         if getattr(response, 'stop_reason', None) == 'refusal':

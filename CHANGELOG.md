@@ -34,6 +34,22 @@ All notable changes to hypeman-social. The format follows
   retries or gives up on, and run the SDKs with their own retries off.
 - The `claude` and `openai` extras, both included in `all`.
 
+### Security
+- **Claude and OpenAI settings are namespaced-only.** They are read from
+  `LLM_CLAUDE_*` / `LLM_OPENAI_*` (and `LLM_MODEL`) by exact name; the bare
+  keys (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `CLAUDE_MODEL`, ...) are ignored so
+  ambient variables cannot redirect a configured credential. `get_config` is
+  unchanged for the other providers. `LLM_OPENAI_BASE_URL` must be `https`
+  (`http` only on loopback) without userinfo, query or fragment, otherwise the
+  provider fails authentication and builds no client.
+- `generate_structured()` strictly parses (no duplicate keys, `NaN`,
+  `Infinity`) and validates the result against the schema locally; a schema
+  with unsupported keywords is refused before the call.
+- Sanitized provider errors no longer carry the SDK error as `__context__`.
+- Malformed numeric settings fall back to defaults with a warning instead of
+  raising during provider construction; `claude` and `anthropic` dedupe in
+  `LLM_FALLBACK_PROVIDER`.
+
 ## [0.3.4] — 2026-10-09
 
 ### Fixed

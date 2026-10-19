@@ -9,23 +9,33 @@ Two paths share one request builder:
 
   generate()             free text, for announcements and chat
   generate_structured()  a strict JSON-schema verdict, for callers such as a
-                         safety classifier. The result either parses and
-                         matches the schema's required keys, or it is None.
-                         A refusal, an incomplete response, bad JSON, or a
-                         missing key is never repaired or guessed at.
+                         safety classifier. The result is strictly parsed
+                         (no duplicate keys, NaN or Infinity) and validated
+                         against the schema locally, or it is None. A refusal,
+                         an incomplete response, bad JSON, or any mismatch is
+                         never repaired or guessed at.
 
 Sampling parameters are not sent: the current models do not document them, and
 a rejected parameter would fail every call. Reasoning effort is the knob.
 """
 
-import json
 import logging
 import os
 import threading
 from typing import Any, Dict, Optional
 
-from hypeman_social.config import get_config, get_secret
-from hypeman_social.llm._cloud import RateLimiter, classify_sdk_error
+from hypeman_social.config import get_secret
+from hypeman_social.config.config import get_exact_config
+from hypeman_social.llm._cloud import (
+    RateLimiter,
+    check_schema_supported,
+    classify_sdk_error,
+    cloud_setting,
+    parse_number,
+    parse_strict_json,
+    validate_against_schema,
+    validate_base_url,
+)
 from hypeman_social.llm.base import BaseLLM
 from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
@@ -52,13 +62,27 @@ class OpenAILLM(BaseLLM):
         self.model: Optional[str] = None
         self.api_key: Optional[str] = None
 
-        self.system_prompt = get_config('LLM', 'openai_system_prompt', default='') or ''
-        self.timeout = float(get_config('LLM', 'openai_timeout', default='30'))
-        self.base_url = get_config('LLM', 'openai_base_url', default='') or None
+        # Every setting is read from its LLM_OPENAI_* name only (see
+        # cloud_setting): an ambient OPENAI_BASE_URL or OPENAI_MODEL must not
+        # beat it, least of all the endpoint, which receives the API key.
+        self.system_prompt = cloud_setting('OPENAI', 'system_prompt', '') or ''
+        self.timeout = parse_number(
+            'LLM_OPENAI_TIMEOUT', cloud_setting('OPENAI', 'timeout'), 30.0)
+        self.base_url = cloud_setting('OPENAI', 'base_url') or None
+        # An endpoint that fails validation is never used: authenticate() fails
+        # closed rather than quietly sending the key to the official host.
+        self.base_url_rejected = False
+        if self.base_url and not validate_base_url(self.base_url):
+            logger.error(
+                "✗ LLM_OPENAI_BASE_URL rejected (needs https, or http on loopback; "
+                "no credentials, query or fragment in the URL)")
+            self.base_url, self.base_url_rejected = None, True
         # 'omit' leaves the model default; 'none' is a real effort level and is sent.
-        self.reasoning_effort = get_config(
-            'LLM', 'openai_reasoning_effort', default='low').strip().lower()
-        self.limiter = RateLimiter(int(get_config('LLM', 'openai_rate_limit', default='60')))
+        self.reasoning_effort = cloud_setting(
+            'OPENAI', 'reasoning_effort', 'low').strip().lower()
+        self.limiter = RateLimiter(parse_number(
+            'LLM_OPENAI_RATE_LIMIT', cloud_setting('OPENAI', 'rate_limit'), 60,
+            integer=True, allow_zero=True))
 
         # The schema for the call in flight on this thread; see generate_structured.
         self._local = threading.local()
@@ -67,6 +91,10 @@ class OpenAILLM(BaseLLM):
     def rate_limit(self) -> int:
         return self.limiter.per_minute
 
+    def provider_config(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """LLM_OPENAI_<KEY>, then the shared LLM_<KEY>; never a bare ambient name."""
+        return cloud_setting('OPENAI', key) or get_exact_config(f'LLM_{key}'.upper(), default)
+
     def set_system_prompt(self, text: str) -> None:
         self.system_prompt = text or ''
 
@@ -74,6 +102,9 @@ class OpenAILLM(BaseLLM):
         """Read the API key and build a client (verified on first use, not here)."""
         if not OPENAI_AVAILABLE:
             logger.error("✗ OpenAI client not installed. Run: pip install 'hypeman-social[openai]'")
+            return False
+
+        if self.base_url_rejected:
             return False
 
         try:
@@ -154,10 +185,15 @@ class OpenAILLM(BaseLLM):
 
         self.limiter.wait()
 
+        # Classify inside the handler, raise outside it, so the credential-bearing
+        # SDK error is not attached as __context__ (`from None` hides only __cause__).
+        failure: Optional[str] = None
         try:
             response = self.client.responses.create(**self._build_request(prompt, max_tokens))
         except Exception as e:
-            raise RuntimeError(classify_sdk_error(e)) from None
+            failure = classify_sdk_error(e)
+        if failure is not None:
+            raise RuntimeError(failure)
 
         structured = getattr(self._local, 'schema', None) is not None
 
@@ -189,9 +225,17 @@ class OpenAILLM(BaseLLM):
 
         Goes through generate(), so availability, throttling, retry and error
         classification are the same as the free-text path. None means refused,
-        incomplete, unparseable, not an object, or missing a required key;
+        incomplete, unparseable, or not matching the schema (types, required,
+        additionalProperties, enum, items); a schema using any other keyword is
+        refused before the call;
         callers must treat it as "no verdict" and fail closed.
         """
+        try:
+            check_schema_supported(schema)
+        except ValueError:
+            logger.warning("⚠ Structured schema uses unsupported keywords; refusing to call")
+            return None
+
         self._local.schema = {'name': name, 'schema': schema}
         try:
             raw = self.generate(prompt, max_tokens=max_tokens)
@@ -201,13 +245,11 @@ class OpenAILLM(BaseLLM):
         if not raw:
             return None
         try:
-            data = json.loads(raw)
-        except ValueError:
-            logger.warning("⚠ OpenAI structured output was not valid JSON; treating as refusal")
+            data = parse_strict_json(raw)
+        except (ValueError, RecursionError):
+            logger.warning("⚠ OpenAI structured output was not strict JSON; treating as refusal")
             return None
-        if not isinstance(data, dict):
-            return None
-        if any(key not in data for key in schema.get('required', [])):
-            logger.warning("⚠ OpenAI structured output missed required keys; treating as refusal")
+        if not isinstance(data, dict) or not validate_against_schema(data, schema):
+            logger.warning("⚠ OpenAI structured output did not match the schema; treating as refusal")
             return None
         return data

@@ -11,6 +11,8 @@ with a fake whose client records requests and replays scripted responses.
 
 import json
 import logging
+import threading
+import traceback
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -102,7 +104,10 @@ def openai_reply(text='hello there', status='completed', refusal=None):
 @pytest.fixture(autouse=True)
 def _no_sleep_and_clean_env(monkeypatch):
     for var in ('CLAUDE_EFFORT', 'CLAUDE_EFFORT_LEVEL', 'ANTHROPIC_API_KEY', 'OPENAI_API_KEY', 'LLM_CLAUDE_API_KEY',
-                'LLM_OPENAI_API_KEY', 'LLM_MODEL', 'DOPPLER_TOKEN'):
+                'LLM_OPENAI_API_KEY', 'LLM_MODEL', 'DOPPLER_TOKEN', 'OPENAI_BASE_URL', 'OPENAI_MODEL',
+                'CLAUDE_MODEL', 'LLM_OPENAI_BASE_URL', 'LLM_OPENAI_MODEL', 'LLM_CLAUDE_MODEL',
+                'LLM_OPENAI_RATE_LIMIT', 'LLM_CLAUDE_RATE_LIMIT', 'LLM_OPENAI_TIMEOUT',
+                'LLM_CLAUDE_TIMEOUT', 'LLM_FALLBACK_PROVIDER', 'OPENAI_TIMEOUT', 'CLAUDE_TIMEOUT'):
         monkeypatch.delenv(var, raising=False)
     with patch('hypeman_social.llm.base.time.sleep'):
         yield
@@ -217,7 +222,9 @@ def test_claude_effort_can_be_omitted(claude):
 
 
 def test_claude_refusal_stop_reason_returns_none(claude):
-    claude.script.results = [claude_reply(text='', stop_reason='refusal')]
+    # The refusal carries text on purpose: only the stop_reason check can
+    # turn this into None, so deleting that check fails the test.
+    claude.script.results = [claude_reply(text='partial answer', stop_reason='refusal')]
     assert claude.generate('x') is None
 
 
@@ -255,14 +262,23 @@ def test_claude_auth_error_is_permanent(claude):
 
 
 def test_claude_connection_error_marks_down_and_heals(claude):
-    claude.script.results = [APIConnectionError('x')]
+    claude.script.results = [APIConnectionError('x'), claude_reply('never')]
+    claude.enable_auto_reconnect = False  # hold the provider down so we can see it
+    assert claude.generate('x', max_retries=3) is None
+    # Classified as a connection loss: down, no retry, reason recorded.
+    assert claude.enabled is False
+    assert len(claude.script.requests) == 1
+    assert 'connection' in claude.status()['last_error']
+    assert claude.is_available() is False
+
+    # Reconnect is allowed again: the stateless client heals and serves.
+    claude.enable_auto_reconnect = True
     claude.reconnect_interval = 0
-    claude.max_retries = 1
-    assert claude.generate('x') is None
-    # After a reconnect the provider is usable again (stateless HTTP).
     claude.script.results = [claude_reply('back')]
     assert claude.is_available() is True
+    assert claude.enabled is True
     assert claude.generate('x') == 'back'
+    assert len(claude.script.requests) == 2
 
 
 def test_claude_limiter_spaces_calls(claude):
@@ -434,13 +450,19 @@ def test_key_never_appears_in_logs_status_or_errors(request, caplog, fixture_nam
     caplog.set_level(logging.DEBUG)
 
     assert llm.generate('x', max_retries=2) is None
+    llm.script.results = [LeakyError()]
     with pytest.raises(RuntimeError) as excinfo:
-        llm.script.results = [LeakyError()]
         llm._raw_generate('x', 10)
+    error = excinfo.value
 
     assert FAKE_KEY not in caplog.text
-    assert FAKE_KEY not in str(excinfo.value)
-    assert FAKE_KEY not in repr(excinfo.value.__cause__)
+    assert FAKE_KEY not in str(error)
+    # `from None` only hides __cause__; the implicit __context__ must be gone too.
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    formatted = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert FAKE_KEY not in formatted
+    assert 'LeakyError' not in formatted
     assert FAKE_KEY not in json.dumps(llm.status(), default=str)
 
 
@@ -506,3 +528,279 @@ def test_fallback_is_still_opt_in(monkeypatch):
     assert LLMManager._fallback_names('ollama') == []
     monkeypatch.setenv('LLM_FALLBACK_PROVIDER', 'claude,openai')
     assert LLMManager._fallback_names('ollama') == ['claude', 'openai']
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Fix round: endpoint/config hijack, schema validation, bad config, aliases
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _openai_sdk(monkeypatch):
+    script = Script([])
+    sdk, created = make_sdk('OpenAI', 'responses', script)
+    monkeypatch.setattr(openai_mod, 'openai', sdk)
+    monkeypatch.setattr(openai_mod, 'OPENAI_AVAILABLE', True)
+    monkeypatch.setenv('OPENAI_API_KEY', FAKE_KEY)
+    return created
+
+
+def test_ambient_bare_endpoint_cannot_redirect_the_key(monkeypatch):
+    created = _openai_sdk(monkeypatch)
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://attacker.invalid/v1')
+    monkeypatch.setenv('LLM_OPENAI_BASE_URL', 'https://gateway.example/v1')
+    assert OpenAILLM().authenticate() is True
+    assert created[0]['base_url'] == 'https://gateway.example/v1'
+
+
+def test_ambient_bare_endpoint_alone_is_ignored(monkeypatch):
+    created = _openai_sdk(monkeypatch)
+    monkeypatch.setenv('OPENAI_BASE_URL', 'https://attacker.invalid/v1')
+    assert OpenAILLM().authenticate() is True
+    assert 'base_url' not in created[0]
+
+
+def test_ambient_bare_model_and_settings_do_not_win(monkeypatch, claude):
+    monkeypatch.setenv('OPENAI_MODEL', 'attacker-model')
+    monkeypatch.setenv('LLM_OPENAI_MODEL', 'real-model')
+    monkeypatch.setenv('CLAUDE_MODEL', 'attacker-model')
+    monkeypatch.setenv('LLM_CLAUDE_MODEL', 'claude-sonnet-5-5')
+    monkeypatch.setenv('CLAUDE_EFFORT_LEVEL', 'max')
+    monkeypatch.setenv('CLAUDE_TIMEOUT', '1')
+    monkeypatch.setenv('OPENAI_TIMEOUT', '1')
+    created = _openai_sdk(monkeypatch)
+    llm = OpenAILLM()
+    assert llm.authenticate() is True
+    assert llm.model == 'real-model'
+    assert llm.timeout == 30.0
+    assert created[0]['timeout'] == 30.0
+    fresh = ClaudeLLM()
+    assert fresh.authenticate() is True
+    assert fresh.model == 'claude-sonnet-5-5'
+    assert fresh.effort == 'low'
+    assert fresh.timeout == 30.0
+
+
+@pytest.mark.parametrize('url', [
+    'http://gateway.example/v1',          # plaintext to a remote host
+    'ftp://gateway.example/v1',
+    'https://user:pw@gateway.example/v1',  # userinfo
+    'https://@gateway.example/v1',
+    'https:///v1',                         # no host
+    'gateway.example/v1',                  # no scheme
+    'https://gateway.example/v1?x=1',
+    'https://gateway.example/v1#frag',
+    'https://gateway.example/\nv1',
+    'javascript:alert(1)',
+    'https://[::1',                        # unparseable
+])
+def test_rejected_base_url_never_gets_the_credential(monkeypatch, caplog, url):
+    created = _openai_sdk(monkeypatch)
+    monkeypatch.setenv('LLM_OPENAI_BASE_URL', url)
+    caplog.set_level(logging.DEBUG)
+    llm = OpenAILLM()
+    assert llm.authenticate() is False
+    assert created == [], 'no client (and so no credential) for a rejected endpoint'
+    assert llm.client is None
+    assert llm._reconnect() is False
+    assert llm.is_available() is False
+    assert created == []
+    assert FAKE_KEY not in caplog.text
+    assert url not in caplog.text
+
+
+@pytest.mark.parametrize('url', [
+    'http://localhost:11434/v1', 'http://127.0.0.1:8080/v1', 'http://[::1]:8080/v1',
+    'https://gateway.example/v1',
+])
+def test_loopback_http_and_https_urls_are_accepted(monkeypatch, url):
+    created = _openai_sdk(monkeypatch)
+    monkeypatch.setenv('LLM_OPENAI_BASE_URL', url)
+    assert OpenAILLM().authenticate() is True
+    assert created[0]['base_url'] == url
+
+
+# --- structured output is validated against the caller's schema ---------------
+
+BOOL_SCHEMA = {
+    'type': 'object',
+    'properties': {'verdict': {'type': 'boolean'}},
+    'required': ['verdict'],
+    'additionalProperties': False,
+}
+
+
+@pytest.mark.parametrize('raw', [
+    '{"verdict":"false","extra":1}',        # wrong type and an extra key
+    '{"verdict":"false"}',                  # wrong type
+    '{"verdict":false,"extra":1}',          # additionalProperties false
+    '{"verdict":false,"verdict":true}',     # duplicate key
+    '{"verdict":NaN}',
+    '{"verdict":Infinity}',
+    '{"verdict":1}',                        # int is not a boolean
+    '{}',
+])
+def test_structured_output_must_match_the_schema_exactly(oai, raw):
+    oai.script.results = [openai_reply(raw)]
+    assert oai.generate_structured('c', BOOL_SCHEMA) is None
+
+
+def test_structured_output_that_matches_is_returned(oai):
+    oai.script.results = [openai_reply('{"verdict":false}')]
+    assert oai.generate_structured('c', BOOL_SCHEMA) == {'verdict': False}
+
+
+def test_structured_validator_covers_the_supported_subset(oai):
+    schema = {
+        'type': 'object',
+        'properties': {
+            'label': {'type': 'string', 'enum': ['a', 'b']},
+            'score': {'type': 'number'},
+            'count': {'type': 'integer'},
+            'tags': {'type': 'array', 'items': {'type': 'string'}},
+            'note': {'type': 'null'},
+        },
+        'required': ['label', 'score'],
+        'additionalProperties': False,
+    }
+    good = '{"label":"a","score":1.5,"count":2,"tags":["x"],"note":null}'
+    oai.script.results = [openai_reply(good)]
+    assert oai.generate_structured('c', schema)['label'] == 'a'
+    for bad in (
+        '{"label":"c","score":1}',              # enum
+        '{"label":"a","score":true}',           # bool is not a number
+        '{"label":"a","score":1,"count":1.5}',  # not an integer
+        '{"label":"a","score":1,"tags":[1]}',   # items
+        '{"label":"a","score":1,"note":0}',     # null
+        '{"label":"a"}',                        # required
+        '[1]',
+    ):
+        oai.script.results = [openai_reply(bad)]
+        assert oai.generate_structured('c', schema) is None, bad
+
+
+def test_unsupported_schema_keyword_is_rejected_not_ignored(oai):
+    schema = dict(BOOL_SCHEMA, properties={'verdict': {'type': 'string', 'pattern': '^a$'}})
+    oai.script.results = [openai_reply('{"verdict":"zzz"}')]
+    assert oai.generate_structured('c', schema) is None
+    assert oai.script.requests == [], 'an unverifiable schema must not even be sent'
+
+
+# --- invalid configuration degrades instead of raising ------------------------
+
+@pytest.mark.parametrize('var', ['LLM_OPENAI_RATE_LIMIT', 'LLM_OPENAI_TIMEOUT'])
+@pytest.mark.parametrize('bad', ['oops', 'nan', 'inf', '-5', '0x10', ''])
+def test_bad_openai_numeric_config_uses_defaults(monkeypatch, caplog, var, bad):
+    monkeypatch.setenv(var, bad)
+    caplog.set_level(logging.WARNING)
+    llm = OpenAILLM()  # must not raise
+    assert llm.timeout == 30.0
+    assert llm.rate_limit == 60
+    if bad:
+        assert var in caplog.text
+        assert bad not in caplog.text or bad.isdigit()
+
+
+@pytest.mark.parametrize('var', ['LLM_CLAUDE_RATE_LIMIT', 'LLM_CLAUDE_TIMEOUT'])
+@pytest.mark.parametrize('bad', ['oops', 'nan', 'inf', '-5'])
+def test_bad_claude_numeric_config_uses_defaults(monkeypatch, caplog, var, bad):
+    monkeypatch.setenv(var, bad)
+    caplog.set_level(logging.WARNING)
+    llm = ClaudeLLM()
+    assert llm.timeout == 30.0
+    assert llm.rate_limit == 50
+    assert var in caplog.text
+    assert bad not in caplog.text
+
+
+def test_zero_rate_limit_still_disables_throttling(monkeypatch):
+    monkeypatch.setenv('LLM_CLAUDE_RATE_LIMIT', '0')
+    assert ClaudeLLM().rate_limit == 0
+
+
+def test_manager_survives_bad_provider_config(monkeypatch):
+    monkeypatch.setenv('LLM_ENABLE', 'true')
+    monkeypatch.setenv('LLM_PROVIDER', 'ollama')
+    monkeypatch.setenv('LLM_FALLBACK_PROVIDER', 'openai,claude')
+    monkeypatch.setenv('LLM_OPENAI_RATE_LIMIT', 'oops')
+    monkeypatch.setenv('LLM_CLAUDE_TIMEOUT', 'oops')
+    manager = LLMManager()
+    assert manager.authenticate() is True
+    assert [p.provider_name for p in manager.fallbacks] == ['openai', 'claude']
+
+
+# --- sanitized errors carry no credential-bearing context ---------------------
+
+@pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+def test_sanitized_error_has_no_context_or_cause(request, fixture_name):
+    llm = request.getfixturevalue(fixture_name)
+    llm.script.results = [LeakyError()]
+    with pytest.raises(RuntimeError) as excinfo:
+        llm._raw_generate('x', 10)
+    error = excinfo.value
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    assert FAKE_KEY not in repr(error.__context__)
+    assert FAKE_KEY not in ''.join(
+        traceback.format_exception(type(error), error, error.__traceback__))
+
+
+# --- structured calls: concurrency and cleanup --------------------------------
+
+def test_concurrent_structured_calls_each_send_their_own_schema(oai):
+    schema_a = dict(BOOL_SCHEMA)
+    schema_b = {'type': 'object', 'properties': {'n': {'type': 'integer'}},
+                'required': ['n'], 'additionalProperties': False}
+    barrier = threading.Barrier(2, timeout=5)
+
+    class Gate:
+        per_minute = 0
+
+        def wait(self):
+            barrier.wait()  # both threads have set their schema before either builds a request
+
+    oai.limiter = Gate()
+    oai.script.results = [openai_reply('{"verdict":true}'), openai_reply('{"n":3}')]
+    out = {}
+
+    def run(key, name, schema):
+        out[key] = oai.generate_structured('p', schema, name=name)
+
+    threads = [threading.Thread(target=run, args=('a', 'sa', schema_a)),
+               threading.Thread(target=run, args=('b', 'sb', schema_b))]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+    sent = {r['text']['format']['name']: r['text']['format']['schema'] for r in oai.script.requests}
+    assert sent == {'sa': schema_a, 'sb': schema_b}
+
+
+def test_schema_cleared_when_generate_raises(oai):
+    with patch.object(OpenAILLM, 'generate', side_effect=RuntimeError('boom')):
+        with pytest.raises(RuntimeError):
+            oai.generate_structured('c', VERDICT_SCHEMA)
+    assert getattr(oai._local, 'schema', None) is None
+    oai.script.results = [openai_reply('plain')]
+    assert oai.generate('d') == 'plain'
+    assert 'text' not in oai.script.requests[-1]
+
+
+# --- alias canonicalisation ---------------------------------------------------
+
+@pytest.mark.parametrize('primary, chain, expected', [
+    ('claude', 'anthropic,claude', []),
+    ('anthropic', 'claude', []),
+    ('claude', 'Anthropic, openai', ['openai']),
+    ('ollama', 'anthropic,claude,openai', ['anthropic', 'openai']),
+    ('ollama', 'claude,anthropic', ['claude']),
+])
+def test_claude_aliases_dedupe_in_the_fallback_chain(monkeypatch, primary, chain, expected):
+    monkeypatch.setenv('LLM_FALLBACK_PROVIDER', chain)
+    assert LLMManager._fallback_names(primary) == expected
+
+
+@pytest.mark.parametrize('raw', ['{"score":NaN}', '{"score":Infinity}', '{"score":-Infinity}', '{"score":1e999}'])
+def test_non_finite_numbers_are_rejected_even_where_a_number_is_allowed(oai, raw):
+    schema = {'type': 'object', 'properties': {'score': {'type': 'number'}},
+              'required': ['score'], 'additionalProperties': False}
+    oai.script.results = [openai_reply(raw)]
+    assert oai.generate_structured('c', schema) is None
