@@ -21,6 +21,61 @@ All notable changes to hypeman-social. The format follows
 ### Tests
 - Locked in that thinking-capable models get `think=false` when thinking mode
   is off (already the behaviour; no code change).
+### Added
+- **Claude provider** (`LLM_PROVIDER=claude`, alias `anthropic`, extra
+  `hypeman-social[claude]`). Defaults to `claude-haiku-5-5`, low effort,
+  thinking off on Haiku, prompt caching on the system block, a request
+  timeout, and a requests-per-minute limiter.
+- **OpenAI provider** (`LLM_PROVIDER=openai`, extra `hypeman-social[openai]`)
+  on the Responses API, with `generate_structured()` for strict JSON-schema
+  verdicts that return `None` on refusal, truncation, bad JSON or a missing
+  key, plus the same timeout and limiter options.
+- Both providers turn SDK errors into key-free messages the base class
+  retries or gives up on, and run the SDKs with their own retries off.
+- The `claude` and `openai` extras, both included in `all`.
+
+### Compatibility
+
+- The `claude` and `openai` extras install only on Python 3.10 or newer, because the Anthropic 1.x and OpenAI 3.x SDKs require it. On Python 3.9 the providers fail closed (unavailable) like any provider whose extra is missing; everything else in hypeman is unchanged.
+
+### Security
+- **Claude and OpenAI settings are namespaced-only.** They are read from
+  `LLM_CLAUDE_*` / `LLM_OPENAI_*` (and `LLM_MODEL`) by exact name; the bare
+  keys (`OPENAI_BASE_URL`, `OPENAI_MODEL`, `CLAUDE_MODEL`, ...) are ignored so
+  ambient variables cannot redirect a configured credential. `get_config` is
+  unchanged for the other providers. `LLM_OPENAI_BASE_URL` must be `https`
+  (`http` only on loopback) without userinfo, query or fragment, otherwise the
+  provider fails authentication and builds no client.
+- `generate_structured()` strictly parses (no duplicate keys, `NaN`,
+  `Infinity`) and validates the result against the schema locally; a schema
+  with unsupported keywords is refused before the call.
+- Both SDK clients now get an explicit base URL (the official endpoint when
+  none is configured), so `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` in the
+  environment can no longer redirect the key, and redirects are disabled on
+  both clients (the Anthropic SDK forwarded `X-Api-Key` across origins).
+- **Network trust comes from settings, not the environment.** Both HTTP
+  clients use `trust_env=False`, so ambient `HTTPS_PROXY`/`ALL_PROXY`/
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` can no longer route or re-trust the key's TLS
+  session. Private proxies and CAs are configured with
+  `LLM_CLAUDE_PROXY` / `LLM_OPENAI_PROXY` and `LLM_CLAUDE_CA_BUNDLE` /
+  `LLM_OPENAI_CA_BUNDLE`; an invalid value makes the provider unavailable.
+  Existing deployments that relied on ambient proxy variables must move them to
+  these settings.
+- Provider errors are a `ProviderError` with a fixed safe message, raised after
+  the SDK handler exits (no chained exception on the provider's own path,
+  suppressed in formatted output when a caller's handler is active). Object
+  level secrecy of a caller's own attached exception is not claimed, and the
+  API key remains reachable from frame locals; both are documented. A failing
+  `status_code` on the SDK error degrades to a generic message.
+- Schema validation bounds enum size, depth and text before allocating (no
+  `RecursionError`, no large temporary stacks), and
+  `integer` accepts integral floats such as `1.0`.
+- Invalid shared numeric settings (`MAX_TOKENS=oops`) no longer crash the
+  Claude and OpenAI constructors.
+- Sanitized provider errors no longer carry the SDK error as `__context__`.
+- Malformed numeric settings fall back to defaults with a warning instead of
+  raising during provider construction; `claude` and `anthropic` dedupe in
+  `LLM_FALLBACK_PROVIDER`.
 
 ## [0.3.4] — 2026-10-09
 

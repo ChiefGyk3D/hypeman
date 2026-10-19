@@ -147,6 +147,22 @@ def get_config(section: str, key: str, default: Any = None) -> Any:
     return default
 
 
+def get_exact_config(name: str, default: Optional[str] = None) -> Optional[str]:
+    """
+    Get a setting by its one exact name: Doppler first, then that env var.
+
+    Unlike get_config() there is no bare-key lookup, so an ambient variable
+    such as ``OPENAI_BASE_URL`` or ``MODEL`` cannot shadow ``LLM_OPENAI_*``.
+    Used for settings that decide where a credential is sent. An empty value
+    counts as unset.
+    """
+    name = name.upper()
+    value = _doppler_lookup(name)
+    if value:
+        return value
+    return os.getenv(name) or default
+
+
 def get_bool_config(section: str, key: str, default: bool = False) -> bool:
     """Get a boolean config value. Accepts true/1/yes/on/enabled, case-insensitive."""
     value = get_config(section, key)

@@ -10,6 +10,8 @@ authenticates or generates.
 - [LLM: provider selection and failover](#llm-provider-selection-and-failover)
 - [LLM: Ollama](#llm-ollama)
 - [LLM: Gemini](#llm-gemini)
+- [LLM: Claude](#llm-claude)
+- [LLM: OpenAI](#llm-openai)
 - [LLM: guardrails](#llm-guardrails)
 - [LLM: recovery](#llm-recovery)
 - [Social: Bluesky](#social-bluesky)
@@ -117,10 +119,65 @@ not spent on hidden reasoning.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `LLM_PROVIDER` | Primary provider: `ollama` or `gemini` | `gemini` |
+| `LLM_PROVIDER` | Primary provider: `ollama`, `gemini`, `claude` (alias `anthropic`) or `openai` | `gemini` |
 | `LLM_FALLBACK_PROVIDER` | Ordered, comma-separated failover chain, e.g. `gemini` or `gemini,ollama`. **Strictly opt-in**: if you chose Ollama so your data stays local, hypeman will never silently ship prompts to Google | *(none)* |
 | `LLM_MODEL` | Model name shared by all providers | provider default |
-| `LLM_OLLAMA_MODEL` / `LLM_GEMINI_MODEL` | Per-provider model; wins over `LLM_MODEL`. Needed whenever primary and fallback run different model names | provider default |
+| `LLM_OLLAMA_MODEL` / `LLM_GEMINI_MODEL` / `LLM_CLAUDE_MODEL` / `LLM_OPENAI_MODEL` | Per-provider model; wins over `LLM_MODEL`. Needed whenever primary and fallback run different model names | provider default |
+
+**Claude and OpenAI read only their own namespace.** Every setting of those two
+providers (`LLM_CLAUDE_*`, `LLM_OPENAI_*`, plus the shared `LLM_MODEL`) is looked
+up by that exact name, Doppler first and then the environment. Unlike the
+other providers, the bare names (`OPENAI_BASE_URL`, `OPENAI_MODEL`,
+`CLAUDE_MODEL`, `CLAUDE_EFFORT`, ...) are ignored, so a variable set for other
+tooling cannot redirect the endpoint that receives your API key. `claude` and
+`anthropic` name the same provider, so listing both in
+`LLM_FALLBACK_PROVIDER` builds one client. A malformed number
+(`LLM_*_TIMEOUT`, `LLM_*_RATE_LIMIT`) logs a warning naming the setting and
+uses the default; it never stops startup. That includes the shared numeric
+settings these two providers inherit (`LLM_MAX_TOKENS`, `LLM_MAX_RETRIES`,
+`LLM_TEMPERATURE`, ...); the other providers still fail fast on a typo.
+
+**Where the key goes.** What is guaranteed, and what is not:
+
+- Both clients are built with an explicit base URL (`https://api.anthropic.com`,
+  `https://api.openai.com/v1`, or your validated `LLM_OPENAI_BASE_URL`), so
+  `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` in the environment are never used.
+- Redirects are disabled: a 3xx is an error, never followed with the key.
+- The HTTP client ignores the process environment for network trust
+  (`trust_env=False`): `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR` and `REQUESTS_CA_BUNDLE` have no effect. Anyone
+  who controls those could otherwise terminate TLS for the pinned host with
+  their own CA and read the key. For a private proxy or CA use the settings
+  below; both are read by exact name (Doppler, then env) and an invalid value
+  makes that provider unavailable with one error naming the setting, never a
+  silent fallback to the environment.
+
+  | Variable | Meaning |
+  |---|---|
+  | `LLM_CLAUDE_PROXY` / `LLM_OPENAI_PROXY` | `http://` or `https://` proxy URL with a host. Credentials in the URL are refused (they would land in config and logs), as are query and fragment |
+  | `LLM_CLAUDE_CA_BUNDLE` / `LLM_OPENAI_CA_BUNDLE` | Path to a readable PEM file. It **replaces** the default trust store for that provider's client |
+
+- Not covered: someone who can set `LLM_*` settings, edit the config source
+  (Doppler project, `.env`), or run code in the process controls the key
+  anyway. The headers `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` and
+  `OPENAI_CUSTOM_HEADERS` / `ANTHROPIC_CUSTOM_HEADERS` are still read by the
+  SDKs and sent to the pinned host only (custom headers can replace an auth
+  header, so do not set them in this process's environment unless you mean to).
+  `ANTHROPIC_AUTH_TOKEN` and Anthropic profile files are not consulted because
+  the API key is passed explicitly.
+- Error handling: provider errors carry only a fixed safe reason (class,
+  status, "connection error", ...), never SDK text, and are raised after the
+  SDK handler exits so they have no chained exception on the provider's own
+  path. If *your* code calls the provider from inside an `except` block,
+  Python attaches that outer exception; the provider marks it suppressed so
+  formatted tracebacks do not print it, but the object stays reachable. Object
+  level secrecy is not claimed. The API key also stays on the provider
+  instance (reconnect needs it), so a traceback's frame locals or a debugger
+  can reach it; do not ship full-locals tracebacks (for example
+  `sentry` with `include_local_variables`) from this process.
+- Structured-output enums are limited to 256 plain-JSON options, 8 levels, 2000
+  nodes and 16,384 characters of strings and object keys in total; a larger enum
+  is refused before the call.
 
 The manager keeps re-probing a downed primary in the background and switches
 back automatically when it recovers — you stop paying for the cloud fallback
@@ -150,6 +207,80 @@ Install extra: `hypeman-social[gemini]`.
 | `LLM_GEMINI_API_KEY` | API key (secret chain applies; `GEMINI_API_KEY` also accepted) | — |
 | `LLM_GEMINI_MODEL` | Model name | `gemini-2.0-flash-lite` |
 | `LLM_GEMINI_RATE_LIMIT` | Client-side requests/minute self-throttle, so you never discover the free-tier limit via 429s | `30` |
+
+## LLM: Claude
+
+Install extra: `hypeman-social[claude]` (the Anthropic SDK needs Python 3.10 or newer; on 3.9 the extra installs nothing and the provider reports itself unavailable). Set `LLM_PROVIDER=claude` (or put
+`claude` in `LLM_FALLBACK_PROVIDER`). Built for high-volume chat, so the
+defaults are the cheap path.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `LLM_CLAUDE_API_KEY` | API key (secret chain applies, Doppler first; `ANTHROPIC_API_KEY` also accepted) | — |
+| `LLM_CLAUDE_MODEL` | `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` or `claude-fable-5-1` | `claude-haiku-5-5` |
+| `LLM_CLAUDE_SYSTEM_PROMPT` | Stable persona/rules prefix sent as the system block. Keep it byte-identical between calls | *(none)* |
+| `LLM_CLAUDE_PROMPT_CACHE` | Put a `cache_control` breakpoint on the system block | `true` |
+| `LLM_CLAUDE_CACHE_TTL` | `5m` or `1h` | `5m` |
+| `LLM_CLAUDE_TIMEOUT` | Per-request timeout, seconds | `30` |
+| `LLM_CLAUDE_EFFORT_LEVEL` | `low`, `medium`, `high`, `xhigh`, `max`, or `omit` for the model default | `low` |
+| `LLM_CLAUDE_THINKING` | `auto`, `disabled`, `adaptive`, `between_tools`, `omit`. `auto` sends `disabled` on Haiku and omits it elsewhere (Sonnet and Opus 5.5 reject `disabled`) | `auto` |
+| `LLM_CLAUDE_RATE_LIMIT` | Client-side requests/minute self-throttle; `0` disables | `50` |
+
+What the options cost:
+
+- **Prompt caching** is the main saving when `LLM_CLAUDE_SYSTEM_PROMPT` is
+  long and calls are frequent: cache reads bill at about 0.1x the input rate,
+  the first write at 1.25x (5 minute TTL) or 2x (1 hour TTL). A prefix below
+  the model's minimum cacheable length silently does not cache, so a short
+  persona gains nothing; check `usage.cache_read_input_tokens`. Use `1h` only
+  when calls are minutes apart.
+- **Effort and thinking** spend output tokens. `low` effort with thinking off
+  keeps a chat reply near its visible length. Raising either costs output
+  tokens, billed at the output rate, and thinking shares the `max_tokens` cap.
+- **Sampling parameters** (`temperature`, `top_p`) are never sent, because
+  Haiku 5.5 and Sonnet 5.5 reject non-default values. `LLM_TEMPERATURE` and
+  `LLM_TOP_P` therefore do not apply to Claude; steer from the prompt.
+- Limits and retries: the SDK's own retries are off, so `LLM_MAX_RETRIES` and
+  `LLM_RETRY_DELAY_BASE` are the only retry layer. A safety decline
+  (`stop_reason: refusal`) returns no text, which the manager treats like any
+  other failed generation (next provider, or the template).
+
+Haiku 5.5 is $0.10 / $0.50 per million input / output tokens up to 100K
+prompt tokens; check the Anthropic pricing page before committing a budget.
+
+## LLM: OpenAI
+
+Install extra: `hypeman-social[openai]` (the OpenAI SDK needs Python 3.10 or newer; on 3.9 the extra installs nothing and the provider reports itself unavailable). Uses the Responses API.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `LLM_OPENAI_API_KEY` | API key (secret chain applies, Doppler first; `OPENAI_API_KEY` also accepted) | — |
+| `LLM_OPENAI_MODEL` | Model id | `gpt-6-luna` |
+| `LLM_OPENAI_SYSTEM_PROMPT` | Sent as `instructions` | *(none)* |
+| `LLM_OPENAI_REASONING_EFFORT` | `none`, `low`, `medium`, `high`, `xhigh`, `max`, or `omit` for the model default | `low` |
+| `LLM_OPENAI_TIMEOUT` | Per-request timeout, seconds | `30` |
+| `LLM_OPENAI_BASE_URL` | Only for an OpenAI-compatible gateway; unset uses OpenAI. Must be `https` (plain `http` only for `localhost`/loopback) with no user info, query or fragment; anything else fails authentication and the key is never attached to it | *(none)* |
+| `LLM_OPENAI_RATE_LIMIT` | Client-side requests/minute self-throttle; `0` disables | `60` |
+
+Requests are sent with `store: false`, and `temperature`/`top_p` are not sent
+(current models do not document them). Reasoning tokens are billed as output
+tokens, so `low` keeps chat cheap; raise it only for work that needs it.
+`gpt-6-luna` is listed at $0.10 / $0.50 per million input / output tokens;
+check the OpenAI pricing page before committing a budget.
+
+**Structured output.** `OpenAILLM.generate_structured(prompt, schema, name)`
+sends a strict JSON schema and returns the parsed object, or `None`. `None`
+covers a model refusal, an incomplete (truncated) response, text that is not
+JSON (duplicate keys, `NaN` and `Infinity` count as invalid), and any
+mismatch with your schema, checked locally: `type`, `properties`, `required`,
+`additionalProperties`, `enum` (at most 256 plain-JSON options, 8 levels deep)
+and `items`; `integer` accepts `1.0` and `1e0` as JSON Schema does. A schema using any other keyword
+(`pattern`, `minimum`, `oneOf`, ...) is refused before the call, because the
+result could not be verified. It never repairs or guesses,
+so a safety classifier should treat `None` as "no verdict" and fail closed.
+It shares availability, throttling, retry and error handling with
+`generate()`. Strict mode requires `additionalProperties: false` and every
+property listed in `required`. Schemas add a small first-call latency.
 
 ## LLM: guardrails
 

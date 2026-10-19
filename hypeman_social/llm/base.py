@@ -77,8 +77,8 @@ class BaseLLM(ABC):
 
         # Recovery state.
         self.enable_auto_reconnect = get_bool_config('LLM', 'enable_auto_reconnect', default=True)
-        self.reconnect_interval = int(get_config('LLM', 'reconnect_interval', default='60'))
-        self.max_reconnect_attempts = int(get_config('LLM', 'max_reconnect_attempts', default='0'))
+        self.reconnect_interval = self._int_setting('reconnect_interval', 60)
+        self.max_reconnect_attempts = self._int_setting('max_reconnect_attempts', 0)
         self._last_reconnect_attempt = 0.0
         self._last_probe = 0.0
         self._reconnect_attempt_count = 0
@@ -87,24 +87,22 @@ class BaseLLM(ABC):
 
         # Generation parameters. Low temperature because small models get
         # "creative" and start inventing giveaways.
-        self.temperature = float(get_config('LLM', 'temperature', default='0.3'))
-        self.top_p = float(get_config('LLM', 'top_p', default='0.9'))
-        self.max_tokens = int(get_config('LLM', 'max_tokens', default='150'))
-        self.max_retries = int(get_config('LLM', 'max_retries', default='3'))
-        self.retry_delay_base = int(get_config('LLM', 'retry_delay_base', default='2'))
+        self.temperature = self._float_setting('temperature', 0.3)
+        self.top_p = self._float_setting('top_p', 0.9)
+        self.max_tokens = self._int_setting('max_tokens', 150)
+        self.max_retries = self._int_setting('max_retries', 3)
+        self.retry_delay_base = self._int_setting('retry_delay_base', 2)
 
         # Reasoning-model support (Qwen3 and friends).
         self.enable_thinking_mode = get_bool_config('LLM', 'enable_thinking_mode', default=False)
-        self.thinking_token_multiplier = float(
-            get_config('LLM', 'thinking_token_multiplier', default='4.0')
-        )
+        self.thinking_token_multiplier = self._float_setting('thinking_token_multiplier', 4.0)
 
         # Guardrail toggles.
         self.enable_deduplication = get_bool_config('LLM', 'enable_deduplication', default=True)
-        self.dedup_cache_size = int(get_config('LLM', 'dedup_cache_size', default='20'))
+        self.dedup_cache_size = self._int_setting('dedup_cache_size', 20)
         self.enable_quality_scoring = get_bool_config('LLM', 'enable_quality_scoring', default=False)
-        self.min_quality_score = int(get_config('LLM', 'min_quality_score', default='6'))
-        self.max_emoji_count = int(get_config('LLM', 'max_emoji_count', default='2'))
+        self.min_quality_score = self._int_setting('min_quality_score', 6)
+        self.max_emoji_count = self._int_setting('max_emoji_count', 2)
         self.enable_profanity_filter = get_bool_config('LLM', 'enable_profanity_filter', default=False)
         self.profanity_severity = get_config('LLM', 'profanity_severity', default='moderate')
         self.enable_platform_validation = get_bool_config('LLM', 'enable_platform_validation', default=True)
@@ -115,6 +113,18 @@ class BaseLLM(ABC):
     # ─────────────────────────────────────────────────────────────────────
     # Availability — the whole point of this class
     # ─────────────────────────────────────────────────────────────────────
+
+    def _int_setting(self, key: str, default: int) -> int:
+        """
+        Read a shared numeric LLM_* setting. Raises ValueError on garbage, which
+        is the long-standing behaviour; the cloud providers override this to
+        degrade to the default instead (see CloudProviderMixin).
+        """
+        return int(get_config('LLM', key, default=str(default)))
+
+    def _float_setting(self, key: str, default: float) -> float:
+        """Float twin of _int_setting."""
+        return float(get_config('LLM', key, default=str(default)))
 
     def is_available(self) -> bool:
         """
