@@ -101,6 +101,23 @@ All notable changes to hypeman-social. The format follows
   are refused; the bounded websocket reader is mandatory (probe at start, no
   stock-reader fallback, `websocket-client>=1.6.0,<2`); `expires_in` of zero or
   less counts as expired; `stop()` returns nothing, use `stopped_cleanly`.
+  A second review round: sends are refused during shared chat or when its state
+  is unknown (session events plus Get Shared Chat Session, no timer); refresh
+  callbacks run in order on one dispatcher thread; a failed recovery keeps its
+  cooldown and missing configuration gets the same secret-cache recovery; every
+  message id is remembered for the whole replay window and far-future or
+  malformed timestamps are refused; the bounded websocket reader is mandatory
+  (probe at start, no stock-reader fallback, `websocket-client>=1.6.0,<2`);
+  `expires_in` of zero or less counts as expired; `stop()` returns nothing, use
+  `stopped_cleanly`.
+- **Discord chat receiving** (`DiscordChat`, `CHAT_REGISTRY['discord']`): a
+  Gateway client (identify, heartbeat with ACK tracking, resume, bounded
+  reconnect backoff, invalid-session handling) that turns guild messages into
+  `ChatEvent`s, and a REST `send()` that never raises and respects Discord's
+  rate limits. Marks relayed (webhook or bot) messages `bridged`, flags the
+  bot's own as `is_self`, maps roles from configured ids only, and ignores DMs.
+  New `discord-chat` extra (`websocket-client`), also part of `all`. See
+  `docs/DISCORD_CHAT.md`.
 
 ## [0.3.4] — 2026-10-09
 

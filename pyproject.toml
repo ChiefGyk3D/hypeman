@@ -48,6 +48,8 @@ doppler   = ["doppler-sdk>=1.3.0"]
 # websocket-client is the synchronous, thread-friendly socket the Twitch chat
 # adapter (EventSub over WebSocket) runs on.
 twitch    = ["websocket-client>=1.6.0,<2"]
+# Gateway websocket for receiving Discord chat (sending uses plain requests).
+discord-chat = ["websocket-client>=1.6.0,<2"]
 
 # Everything a daemon typically needs: all four networks and every LLM provider.
 all = [

@@ -32,7 +32,7 @@ OPTIONAL_MODULES = [
     'boto3',
     'hvac',
     'dopplersdk',
-    'websocket',
+    'websocket',    # websocket-client, the twitch and discord-chat extras
 ]
 
 
@@ -138,6 +138,20 @@ def test_twitch_chat_fails_closed_without_extras():
         assert chat.is_available() is False
         chat.start(lambda event: None)  # must not raise or spawn a thread
         assert chat._thread is None
+        chat.stop()
+    """)
+    assert result.returncode == 0, result.stderr
+
+
+def test_discord_chat_fails_closed_without_extras():
+    """No websocket-client: construct fine, report unavailable, start() is a no-op."""
+    result = _run_with_extras_blocked("""
+        from hypeman_social.social import CHAT_REGISTRY
+        chat = CHAT_REGISTRY['discord']()
+        assert chat.name == 'discord'
+        assert chat.is_available() is False
+        chat.start(lambda event: None)
+        assert chat.send('123', 'hi') is False
         chat.stop()
     """)
     assert result.returncode == 0, result.stderr
