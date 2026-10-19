@@ -1725,7 +1725,7 @@ def test_a_reload_that_adds_an_error_is_all_or_nothing(chat, monkeypatch):
 
 
 def test_the_snapshot_does_not_print_the_token():
-    assert FAKE_TOKEN not in repr(dc._Config(token=FAKE_TOKEN))
+    assert FAKE_TOKEN not in repr(dc._Config(token=dc._Secret(FAKE_TOKEN)))
 
 
 def test_a_different_reloaded_token_never_resumes_the_old_session(chat, monkeypatch):
@@ -1755,11 +1755,14 @@ def test_a_reload_of_the_same_token_still_resumes(chat):
 
 # -- the automatic close acknowledgement ----------------------------------
 
-def sent_close_status(resumable):
+def sent_close_status(resumable, stop_requested=False):
     """Feed a real reader a server close frame; decode what it transmitted."""
     ws, far = real_ws(max_bytes=1000)
     try:
         ws.resumable = resumable
+        ws.stop_event = threading.Event()
+        if stop_requested:
+            ws.stop_event.set()  # requested while the read was blocked
         far.sendall(bytes([0x88, 2]) + struct.pack('!H', 1001))
         opcode, frame = ws.recv_data_frame(True)
         assert opcode == 8
@@ -1780,6 +1783,15 @@ def test_the_libraries_own_close_ack_keeps_a_resumable_session():
 
 def test_the_libraries_own_close_ack_is_orderly_when_not_resumable():
     assert sent_close_status(False) == dc.ORDERLY_CLOSE_CODE
+
+
+def test_a_stop_requested_during_the_read_wins_over_the_cached_flag():
+    assert sent_close_status(True, stop_requested=True) == dc.ORDERLY_CLOSE_CODE
+
+
+def test_the_session_hands_the_reader_its_stop_event(chat):
+    ws = run_session(chat, [text(10, HELLO)])
+    assert ws.stop_event is chat._stop_event
 
 
 def test_the_session_tells_the_reader_whether_a_close_is_resumable(chat):
@@ -1955,3 +1967,124 @@ def test_a_channels_lock_keeps_its_identity_across_many_other_channels(chat):
         a.join(5)
         b.join(5)
     assert len(chat._http.calls) == 2 + len(others)
+
+
+# -- error reporting cannot escape the fence ------------------------------
+
+class ExplodingHandler(logging.Handler):
+    def __init__(self, exc_type):
+        super().__init__(level=logging.DEBUG)
+        self.exc_type = exc_type
+
+    def emit(self, record):
+        raise self.exc_type('logging backend failed')
+
+
+@pytest.fixture
+def exploding_logs():
+    installed = []
+
+    def install(exc_type):
+        handler = ExplodingHandler(exc_type)
+        dc.logger.addHandler(handler)
+        installed.append(handler)
+        return handler
+
+    saved = (dc.logger.level, dc.logger.propagate)
+    dc.logger.setLevel(logging.DEBUG)
+    dc.logger.propagate = False
+    yield install
+    for handler in installed:
+        dc.logger.removeHandler(handler)
+    dc.logger.setLevel(saved[0])
+    dc.logger.propagate = saved[1]
+
+
+@pytest.mark.parametrize('exc_type', [KeyboardInterrupt, BaseException])
+def test_a_failing_log_backend_cannot_escape_the_worker_fence(chat, monkeypatch, exploding_logs, exc_type):
+    escaped = hook_excepthook(monkeypatch)
+    exploding_logs(exc_type)
+
+    def boom():
+        raising_with_context()
+
+    chat._session = boom
+    chat.start(lambda e: None)
+    chat._thread.join(5)
+    assert not chat._thread.is_alive()
+    assert escaped == []
+    assert chat._fatal and 'BaseException' in chat._fatal
+
+
+@pytest.mark.parametrize('exc_type', [KeyboardInterrupt, BaseException])
+def test_a_failing_log_backend_cannot_break_send(chat, exploding_logs, exc_type):
+    exploding_logs(exc_type)
+    chat._http = FakeHTTP([BaseException(f'boom {FAKE_TOKEN}')])
+    assert chat.send(CHAN, 'hi') is False
+
+
+@pytest.mark.parametrize('exc_type', [KeyboardInterrupt, BaseException])
+def test_a_failing_log_backend_cannot_break_the_handler_fence(chat, monkeypatch, exploding_logs, exc_type):
+    escaped = hook_excepthook(monkeypatch)
+    exploding_logs(exc_type)
+    got = []
+
+    def handler(event):
+        got.append(event)
+        raising_with_context()
+
+    ws = FakeWS([text(10, HELLO), text(0, msg(), s=2, t='MESSAGE_CREATE'),
+                 text(0, msg(id='400000000000000002'), s=3, t='MESSAGE_CREATE')],
+                on_empty=lambda: time.sleep(0.01))
+    chat._connect = lambda url: ws
+    chat.start(handler)
+    try:
+        assert wait_for(lambda: len(got) == 2)
+        assert chat._thread.is_alive() and chat._fatal is None
+    finally:
+        chat.stop()
+    assert escaped == []
+
+
+# -- the snapshot cannot be serialised with the token ---------------------
+
+def test_the_token_is_not_in_vars_or_pickle(chat):
+    import pickle
+    cfg = chat._cfg
+    assert cfg.token.reveal() == FAKE_TOKEN
+    assert FAKE_TOKEN not in str(vars(cfg)) and FAKE_TOKEN not in repr(cfg)
+    assert FAKE_TOKEN not in str(vars(dc._Config(token=dc._Secret(FAKE_TOKEN))))
+    with pytest.raises(TypeError):
+        pickle.dumps(cfg)
+    with pytest.raises(TypeError):
+        pickle.dumps(cfg.token)
+    assert FAKE_TOKEN not in repr(cfg.token) and FAKE_TOKEN not in str(cfg.token)
+
+
+# -- strict session_start_limit -------------------------------------------
+
+def limit_body(**over):
+    fields = {'total': 1000, 'remaining': 900, 'reset_after': 3600000, 'max_concurrency': 1}
+    fields.update(over)
+    return Resp(200, {'url': 'wss://gateway.discord.gg/', 'session_start_limit': fields})
+
+
+@pytest.mark.parametrize('over', [
+    {'total': 1000.5}, {'remaining': 900.5}, {'reset_after': 1.5}, {'max_concurrency': 1.5},
+    {'total': 1000.0}, {'remaining': 900.0},
+    {'remaining': 1001}, {'total': 0}, {'total': -1}, {'remaining': -1},
+    {'reset_after': -1}, {'max_concurrency': 0},
+    {'total': True}, {'remaining': True}, {'reset_after': True}, {'max_concurrency': True},
+    {'total': dc.START_LIMIT_TOTAL_MAX + 1, 'remaining': 0},
+    {'reset_after': dc.START_LIMIT_RESET_MAX_MS + 1},
+    {'max_concurrency': dc.START_LIMIT_CONCURRENCY_MAX + 1},
+])
+def test_strict_start_limit_rejections(chat, over):
+    chat._http = FakeHTTP(gets=[limit_body(**over)])
+    assert chat._start_limit(FAKE_TOKEN) is None
+
+
+def test_a_consistent_integer_start_limit_is_accepted(chat):
+    chat._http = FakeHTTP(gets=[limit_body(remaining=1000)])
+    assert chat._start_limit(FAKE_TOKEN) == (dc.GATEWAY_URL.replace('?v=10&encoding=json', '')
+                                             + '?v=10&encoding=json', 1000, 1000)

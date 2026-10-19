@@ -146,6 +146,10 @@ DAILY_IDENTIFY_LIMIT = 1000
 #: Identifies never spent, so a restart loop cannot exhaust the allowance.
 IDENTIFY_RESERVE = 20
 DAY_SECONDS = 86400.0
+#: Sanity bounds for GET /gateway/bot (documented as integers; reset_after in ms).
+START_LIMIT_TOTAL_MAX = 1_000_000
+START_LIMIT_RESET_MAX_MS = 31 * 86_400_000
+START_LIMIT_CONCURRENCY_MAX = 1000
 
 #: How long stop() waits for the worker, then again after closing the socket.
 STOP_JOIN_SECONDS = 5.0
@@ -248,6 +252,9 @@ def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
         #: Set by the session before each read: whether a received close should
         #: be acknowledged in a way that keeps the session.
         resumable = False
+        #: The worker's stop event: a shutdown requested while a read was blocked
+        #: wins over the flag cached before it.
+        stop_event: Any = None
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
             limit = kwargs.pop('max_bytes', MAX_MESSAGE_BYTES)
@@ -256,7 +263,8 @@ def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
                 self._recv, bool(kwargs.get('skip_utf8_validation', False)), limit=limit)
 
         def send_close(self, status: int = ORDERLY_CLOSE_CODE, reason: Any = b'') -> None:
-            if status == ORDERLY_CLOSE_CODE and self.resumable:
+            stopping = self.stop_event is not None and self.stop_event.is_set()
+            if status == ORDERLY_CLOSE_CODE and self.resumable and not stopping:
                 status = RESUMABLE_CLOSE_CODE
             super().send_close(status, reason)
 
@@ -321,12 +329,36 @@ def _reader_error() -> Optional[str]:
     return _reader_cache[0]
 
 
+class _Secret:
+    """Holds the bot token where vars(), repr() and pickle cannot reach it."""
+
+    __slots__ = ('_value',)
+
+    def __init__(self, value: str) -> None:
+        self._value = value
+
+    def reveal(self) -> str:
+        return self._value
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, _Secret) and other._value == self._value
+
+    def __hash__(self) -> int:
+        return hash(self._value)
+
+    def __repr__(self) -> str:
+        return '[redacted]'
+
+    def __reduce__(self) -> Any:
+        raise TypeError('a credential is not serialisable')
+
+
 @dataclass(frozen=True)
 class _Config:
     """One immutable reading of the settings, published by a single assignment so
     no reader ever sees a half-applied reload."""
 
-    token: Optional[str] = field(default=None, repr=False)
+    token: Optional[_Secret] = field(default=None, repr=False)
     guild_id: Optional[str] = None
     channel_ids: FrozenSet[str] = frozenset()
     mod_role_ids: FrozenSet[str] = frozenset()
@@ -400,7 +432,8 @@ class DiscordChat(ChatReceiver):
         is_available() so recovery can heal.
         """
         with self._cfg_lock:
-            token = platform_secret('Discord', 'bot_token') or None
+            raw_token = platform_secret('Discord', 'bot_token')
+            token = _Secret(raw_token) if raw_token else None
             bad: List[str] = []
 
             guild: Optional[str] = (platform_secret('Discord', 'guild_id') or '').strip() or None
@@ -433,6 +466,14 @@ class DiscordChat(ChatReceiver):
                 error=f'{" and ".join(bad)} is set but is not valid' if bad else None,
                 generation=self._cfg.generation + (self._cfg.token != token))
             return self._cfg
+
+    def _report(self, level: int, message: str, exc: BaseException) -> None:
+        """Log from inside a fence. A failing logging backend must neither escape
+        nor chain the original exception (the thread excepthook prints chains)."""
+        try:
+            logger.log(level, '%s: %s', message, self._describe(exc))
+        except BaseException:
+            pass  # reporting is best effort and must never raise
 
     @staticmethod
     def _describe(exc: BaseException) -> str:
@@ -548,7 +589,7 @@ class DiscordChat(ChatReceiver):
             self._run()
         except BaseException as exc:
             self._fatal = f'the receive thread failed ({self._describe(exc)}); call start() to restart'
-            logger.error('Discord chat worker failed: %s', self._describe(exc))
+            self._report(logging.ERROR, 'Discord chat worker failed', exc)
 
     def _run(self) -> None:
         stop = self._stop_event
@@ -577,11 +618,11 @@ class DiscordChat(ChatReceiver):
         """GET /gateway/bot: (gateway url, total, remaining), or None unless Discord
         gave a complete, valid answer. Asked before every fresh Identify, so the
         budget is never guessed and no state about it is kept."""
-        def number(value: Any, low: int) -> int:
-            if isinstance(value, bool) or not isinstance(value, (int, float)) \
-                    or not math.isfinite(value) or value < low:
+        def number(value: Any, low: int, high: int) -> int:
+            # Discord documents every field as an integer (reset_after in ms).
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
                 raise ValueError('bad session_start_limit field')
-            return int(value)
+            return value
 
         try:
             resp = self._session_http().get(
@@ -593,10 +634,10 @@ class DiscordChat(ChatReceiver):
                 return None
             data = resp.json()
             limit = data['session_start_limit']
-            total = number(limit['total'], 1)
-            remaining = number(limit['remaining'], 0)
-            number(limit['reset_after'], 0)
-            number(limit['max_concurrency'], 1)
+            total = number(limit['total'], 1, START_LIMIT_TOTAL_MAX)
+            remaining = number(limit['remaining'], 0, total)
+            number(limit['reset_after'], 0, START_LIMIT_RESET_MAX_MS)
+            number(limit['max_concurrency'], 1, START_LIMIT_CONCURRENCY_MAX)
             url = data.get('url')
             if isinstance(url, str) and is_trusted_gateway_url(url):
                 url += ('&' if '?' in url else '?') + _GATEWAY_QUERY
@@ -638,9 +679,9 @@ class DiscordChat(ChatReceiver):
         """One connection, from connect to disconnect. Returns when it ends."""
         stop = self._stop_event
         cfg = self._cfg
-        token = cfg.token
-        if not token:
+        if not cfg.token:
             return
+        token = cfg.token.reveal()
         url = GATEWAY_URL
         # A reloaded, different credential never resumes the previous one's session.
         resuming = (self._session_id is not None and self._seq is not None
@@ -662,6 +703,7 @@ class DiscordChat(ChatReceiver):
             return
         ws = self._connect(url)
         self._ws = ws
+        ws.stop_event = stop
         self._acked = True
         self._next_beat = float('inf')
         status: Optional[int] = None
@@ -775,7 +817,8 @@ class DiscordChat(ChatReceiver):
         At HELLO a session id exists only if _session decided to resume."""
         if self._stop_event.is_set():
             return False
-        token = self._active.token
+        secret = self._active.token
+        token = secret.reveal() if secret else None
         if self._session_id and self._seq is not None:
             self._send_frame(ws, {'op': OP_RESUME, 'd': {
                 'token': token, 'session_id': self._session_id, 'seq': self._seq}})
@@ -828,7 +871,7 @@ class DiscordChat(ChatReceiver):
                 except BaseException as exc:
                     # Foreign code. Class name only, and nothing escapes to kill the
                     # worker or reach the thread excepthook with chained context.
-                    logger.warning('Discord chat handler failed: %s', self._describe(exc))
+                    self._report(logging.WARNING, 'Discord chat handler failed', exc)
 
     # -- conversion --------------------------------------------------------
 
@@ -906,7 +949,7 @@ class DiscordChat(ChatReceiver):
         try:
             return self._send(channel, text, reply_to_id)
         except BaseException as exc:  # the documented contract: never raises
-            logger.warning('Discord send failed: %s', self._describe(exc))
+            self._report(logging.WARNING, 'Discord send failed', exc)
             return False
 
     def _admit(self, channel: str, started: float) -> bool:
@@ -925,7 +968,8 @@ class DiscordChat(ChatReceiver):
             self._sleep(pause)
 
     def _send(self, channel: str, text: str, reply_to_id: Optional[str]) -> bool:
-        token = self._cfg.token
+        secret = self._cfg.token
+        token = secret.reveal() if secret else None
         if not token or not _is_snowflake(str(channel)) or not text:
             return False
         if len(text) > MESSAGE_LIMIT:
