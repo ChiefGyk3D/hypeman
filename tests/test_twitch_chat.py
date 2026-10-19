@@ -916,6 +916,7 @@ class LoopbackWs:
                     hashlib.sha1((key + GUID).encode()).digest()).decode()
                 self.script(conn, path, accept)
             except OSError:
+                # The client may hang up mid-handshake in the redirect and abort tests.
                 pass
             finally:
                 conn.close()
@@ -945,6 +946,7 @@ def test_default_connect_returns_the_bounded_reader(no_proxy):
         try:
             conn.recv(1)
         except OSError:
+            # The peer closing first is expected; there is nothing to clean up.
             pass
 
     server = LoopbackWs(script)
@@ -1362,6 +1364,7 @@ class BarrierDeque(collections.deque):
             try:
                 self.barrier.wait(timeout=0.4)
             except threading.BrokenBarrierError:
+                # The other party may already have left; the barrier is only a rendezvous.
                 pass
         return size
 
