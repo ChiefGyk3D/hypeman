@@ -32,6 +32,7 @@ OPTIONAL_MODULES = [
     'boto3',
     'hvac',
     'dopplersdk',
+    'websocket',
 ]
 
 
@@ -125,5 +126,18 @@ def test_llm_providers_fail_closed_without_extras():
         assert GeminiLLM().authenticate() is False
         assert ClaudeLLM().authenticate() is False
         assert OpenAILLM().authenticate() is False
+    """)
+    assert result.returncode == 0, result.stderr
+
+
+def test_twitch_chat_fails_closed_without_extras():
+    """No websocket-client: the adapter imports and is simply unavailable."""
+    result = _run_with_extras_blocked("""
+        from hypeman_social.social import CHAT_REGISTRY
+        chat = CHAT_REGISTRY['twitch']()
+        assert chat.is_available() is False
+        chat.start(lambda event: None)  # must not raise or spawn a thread
+        assert chat._thread is None
+        chat.stop()
     """)
     assert result.returncode == 0, result.stderr

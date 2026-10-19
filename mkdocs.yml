@@ -36,6 +36,7 @@ nav:
   - Quickstart: QUICKSTART.md
   - Configuration reference: CONFIGURATION.md
   - API reference: API.md
+  - Twitch chat bot: TWITCH_BOT.md
   - Design notes: DESIGN.md
   - Publishing: PUBLISHING.md
 

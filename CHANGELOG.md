@@ -76,6 +76,31 @@ All notable changes to hypeman-social. The format follows
 - Malformed numeric settings fall back to defaults with a warning instead of
   raising during provider construction; `claude` and `anthropic` dedupe in
   `LLM_FALLBACK_PROVIDER`.
+- **Twitch chat adapter** (`hypeman_social.social.twitch.TwitchChat`, registered
+  in the new `CHAT_REGISTRY`). Hears a channel over EventSub WebSocket
+  (`channel.chat.message`) and replies through Helix Send Chat Message, as a
+  separate bot account with its own Twitch application. Validates the token at
+  start and hourly, refreshes it, and goes unavailable with one clear error if
+  it cannot. New `twitch` extra (`websocket-client`). See `docs/TWITCH_BOT.md`.
+  Hardened after an adversarial review: shared-chat messages from other
+  channels are dropped; the newest rotated refresh token is never replaced by an
+  older stored one and an optional `on_token_refresh` callback lets the consumer
+  persist it; a replacement token is used only after validation and never past
+  its known expiry; a cooldown retry re-reads the secrets; stop/start cannot
+  leave two receivers; frames are bounded by encoded bytes before allocation;
+  handshake redirects and non-Twitch reconnect URLs are refused; control
+  characters and `/` or `.` command prefixes are refused on send; notifications
+  older than ten minutes are dropped.
+  A second review round: every send asks Twitch (Get Shared Chat Session)
+  right before the POST and is refused if a session is active or the answer is
+  unknown (no cache, no timer, no extra subscriptions); `on_token_refresh` gets
+  the latest pair through one latest-wins slot on a dispatcher thread, with
+  every exception contained; a failed recovery keeps its cooldown and missing
+  configuration gets the same secret-cache recovery; every message id is
+  remembered for the whole replay window and far-future or malformed timestamps
+  are refused; the bounded websocket reader is mandatory (probe at start, no
+  stock-reader fallback, `websocket-client>=1.6.0,<2`); `expires_in` of zero or
+  less counts as expired; `stop()` returns nothing, use `stopped_cleanly`.
 
 ## [0.3.4] — 2026-10-09
 

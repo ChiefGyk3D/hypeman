@@ -18,6 +18,7 @@ authenticates or generates.
 - [Social: Mastodon](#social-mastodon)
 - [Social: Discord](#social-discord)
 - [Social: Matrix](#social-matrix)
+- [Chat: Twitch](#chat-twitch)
 - [Logging](#logging)
 - [Worked examples](#worked-examples)
 
@@ -405,6 +406,29 @@ Getting credentials: create a Meta app at
 account. Your numeric user ID comes back from
 `GET https://graph.threads.net/v1.0/me?fields=id`. Long-lived tokens last
 ~60 days; refresh them with `GET .../refresh_access_token` before expiry.
+
+## Chat: Twitch
+
+Needs the `twitch` extra (`pip install "hypeman-social[twitch]"`, which adds
+`websocket-client`). Hears one channel and replies as a dedicated bot account.
+Setup, scopes and revocation are in [TWITCH_BOT.md](TWITCH_BOT.md).
+
+Every key is read through the secret chain (Doppler first) as
+`platform_secret('Twitch', key)`; there are no plain settings.
+
+| Key | Meaning | Required |
+|---|---|---|
+| `client_id` | Client ID of the bot's own Twitch application | yes |
+| `client_secret` | That application's client secret; used only to refresh the token | for refresh |
+| `access_token` | The bot account's user access token (`user:read:chat`, `user:write:chat`) | yes |
+| `refresh_token` | The matching refresh token | for refresh |
+| `bot_user_id` | Numeric Twitch user id of the bot account | yes |
+| `channel` | Channel to join, as a login name or a numeric user id | yes |
+
+The adapter shares the `TWITCH_` prefix with any other Twitch credentials in
+the same Doppler config (for example a stream announcer's own application). Point
+the bot at its own bundle with `SECRETS_DOPPLER_TWITCH_SECRET_NAME` (for example
+`TWITCHBOT`, so keys read `TWITCHBOT_CLIENT_ID`), or give it its own Doppler config.
 
 ## Logging
 
