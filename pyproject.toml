@@ -47,7 +47,7 @@ vault     = ["hvac>=2.1.0"]
 doppler   = ["doppler-sdk>=1.3.0"]
 # websocket-client is the synchronous, thread-friendly socket the Twitch chat
 # adapter (EventSub over WebSocket) runs on.
-twitch    = ["websocket-client>=1.6.0"]
+twitch    = ["websocket-client>=1.6.0,<2"]
 
 # Everything a daemon typically needs: all four networks and every LLM provider.
 all = [
@@ -59,7 +59,7 @@ all = [
     "google-genai>=0.3.0",
     "anthropic>=1.15.0; python_version >= '3.10'",
     "openai>=3.35.0; python_version >= '3.10'",
-    "websocket-client>=1.6.0",
+    "websocket-client>=1.6.0,<2",
 ]
 
 dev = [

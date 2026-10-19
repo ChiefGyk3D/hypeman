@@ -33,7 +33,10 @@ Security notes that shaped the code:
 import collections
 import json
 import logging
+import queue
 import re
+import socket
+import struct
 import threading
 import time
 import unicodedata
@@ -116,11 +119,23 @@ MAX_FRAME_BYTES = 1024 * 1024
 #: Twitch's own guidance: ignore a notification whose ``message_timestamp`` is
 #: older than ten minutes (dev.twitch.tv/docs/eventsub, replay attacks).
 REPLAY_WINDOW = 600.0
-#: Size bound on the seen-id cache, next to the REPLAY_WINDOW time bound.
-SEEN_IDS = 4096
-#: After a message from another channel of a shared chat session is seen, the
-#: bot stays quiet this long: a user-token send would reach every channel.
-SHARED_CHAT_QUIET = 600.0
+#: A notification stamped further than this in the future is refused (clock skew
+#: allowance; anything beyond it cannot be a fresh message from Twitch).
+FUTURE_SKEW = 60.0
+#: Notification ids are remembered this long: long enough that any frame whose
+#: timestamp still passes the age and future checks is also still remembered.
+SEEN_RETENTION = REPLAY_WINDOW + FUTURE_SKEW
+#: Hard memory cap on remembered ids. Reaching it drops the oldest id (and logs
+#: once that the replay guarantee is weaker); service continues.
+SEEN_IDS_CAP = 100_000
+#: Documented revocation statuses (EventSub WebSocket docs); anything else is
+#: logged as a fixed marker, never as the received text.
+REVOCATION_STATUSES = frozenset({'user_removed', 'authorization_revoked', 'version_removed'})
+#: Drop codes safe to echo. Twitch does not document the full set of
+#: ``drop_reason.code`` values, so only values seen in practice are listed.
+DROP_CODES = frozenset({'automod_held'})
+SHARED_CHAT_TYPES = ('channel.shared_chat.begin', 'channel.shared_chat.update',
+                     'channel.shared_chat.end')
 
 REQUIRED_SCOPES = ('user:read:chat', 'user:write:chat')
 
@@ -168,24 +183,28 @@ def _is_timeout(exc: BaseException) -> bool:
     return isinstance(exc, TimeoutError) or type(exc).__name__ == 'WebSocketTimeoutException'
 
 
-def _make_bounded_websocket() -> Any:
-    """A websocket-client WebSocket that refuses oversize frames up front.
+def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
+    """(class, None) for a websocket-client WebSocket that refuses oversize frames
+    up front, or (None, reason) when this websocket-client cannot support it.
 
     The stock reader trusts the length in a frame header and allocates for it
     (and for every fragment of a message) before any size check can run. The
     subclass checks the declared length straight after the header is read, so a
     frame or an aggregate over MAX_FRAME_BYTES is refused before its payload is
     received. websocket-client has no per-message limit option of its own, so
-    this leans on its ``frame_buffer`` internals; if they change shape the
-    function returns None and the caller falls back to the stock class plus the
-    after-the-fact byte check in ``_recv`` (see docs/TWITCH_BOT.md).
+    this leans on its ``frame_buffer`` internals. There is no fallback to the
+    stock reader: the adapter reports itself unavailable instead (see
+    ``_reader_error``), and ``_probe_reader`` proves the hook works.
     """
     if websocket is None:
-        return None
+        return None, 'websocket-client is not installed'
     try:
         from websocket._abnf import ABNF, frame_buffer
     except ImportError:
-        return None
+        return None, 'websocket._abnf.frame_buffer cannot be imported'
+    for attribute in ('recv_length', 'recv_frame'):
+        if not callable(getattr(frame_buffer, attribute, None)):
+            return None, f'frame_buffer.{attribute} is missing'
 
     class _BoundedFrameBuffer(frame_buffer):
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -214,25 +233,96 @@ def _make_bounded_websocket() -> Any:
             self.frame_buffer = _BoundedFrameBuffer(
                 self._recv, bool(kwargs.get('skip_utf8_validation', False)))
 
-    return _BoundedWebSocket
+    return _BoundedWebSocket, None
 
 
-_BoundedWebSocket = _make_bounded_websocket()
+_BoundedWebSocket, _BOUNDED_ERROR = _make_bounded_websocket()
+_reader_cache: Optional[Tuple[Optional[str]]] = None
+
+
+def _probe_reader(cls: Any) -> Optional[str]:
+    """Prove, on an in-process socket pair, that ``cls`` refuses a frame whose
+    header declares more than MAX_FRAME_BYTES before its payload arrives (only
+    eight payload bytes are ever sent, so a trusting reader times out), and that
+    an ordinary frame still reads. Returns a reason on failure, None on success."""
+    def pair() -> Tuple[Any, Any, Any]:
+        reader, writer = socket.socketpair()
+        reader.settimeout(0.5)
+        ws = cls()
+        ws.sock = reader
+        ws.connected = True
+        return ws, reader, writer
+
+    try:
+        ws, reader, writer = pair()
+        try:
+            writer.sendall(struct.pack('!BBQ', 0x81, 127, MAX_FRAME_BYTES + 1) + b'x' * 8)
+            try:
+                ws.recv()
+            except FrameTooLarge:
+                pass
+            except Exception:
+                return 'an oversize frame was not refused before its payload was read'
+            else:
+                return 'an oversize frame was accepted'
+        finally:
+            reader.close()
+            writer.close()
+        ws, reader, writer = pair()
+        try:
+            writer.sendall(struct.pack('!BB', 0x81, 5) + b'hello')
+            if ws.recv() != 'hello':
+                return 'an ordinary frame was not read correctly'
+        finally:
+            reader.close()
+            writer.close()
+    except Exception:
+        return 'the compatibility probe itself failed'
+    return None
+
+
+def _reader_error() -> Optional[str]:
+    """None when the bounded reader exists and passed its probe, else a reason
+    naming the installed websocket-client. Computed once per process."""
+    global _reader_cache
+    if _reader_cache is None:
+        version = getattr(websocket, '__version__', 'unknown') if websocket else 'not installed'
+        reason: Optional[str] = None
+        if _BoundedWebSocket is None:
+            reason = _BOUNDED_ERROR or 'no bounded reader'
+        else:
+            reason = _probe_reader(_BoundedWebSocket)
+        if reason:
+            reason = (f'Twitch chat disabled: websocket-client {version} cannot provide the '
+                      f'size-bounded reader this adapter requires ({reason}). Install a tested '
+                      f'version: pip install "websocket-client>=1.6.0,<2"')
+        _reader_cache = (reason,)
+    return _reader_cache[0]
 
 
 def _default_connect(url: str, timeout: float) -> Any:
+    # Never fall back to the stock reader: it checks sizes after allocating.
+    if _reader_error() is not None:
+        raise OSError('the size-bounded websocket reader is unavailable')
     # redirect_limit=0: websocket-client would otherwise follow a 3xx from the
     # handshake to any host, past every URL check made before connecting.
-    options: Dict[str, Any] = {'timeout': timeout, 'redirect_limit': 0}
-    if _BoundedWebSocket is not None:
-        options['class_'] = _BoundedWebSocket
-    ws = websocket.create_connection(url, **options)
-    # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
-    # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
-    if ws.getstatus() != 101:
-        ws.close()
-        raise OSError('EventSub handshake was not an upgrade')
-    return ws
+    ws = websocket.create_connection(url, timeout=timeout, redirect_limit=0,
+                                     class_=_BoundedWebSocket)
+    handed_over = False
+    try:
+        # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
+        # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
+        if ws.getstatus() != 101:
+            raise OSError('EventSub handshake was not an upgrade')
+        handed_over = True
+        return ws
+    finally:
+        if not handed_over:
+            try:
+                ws.close()
+            except Exception:
+                # Nothing more to do: the caller gets the original failure.
+                pass
 
 
 def _parse_timestamp(value: Any) -> Optional[float]:
@@ -247,7 +337,10 @@ def _parse_timestamp(value: Any) -> Optional[float]:
         moment = datetime(int(year), int(month), int(day), int(hour), int(minute),
                           int(second), tzinfo=timezone.utc)
         if zone != 'Z':
-            offset = timedelta(hours=int(zone[1:3]), minutes=int(zone[4:6]))
+            hours, minutes = int(zone[1:3]), int(zone[4:6])
+            if hours > 23 or minutes > 59:
+                return None
+            offset = timedelta(hours=hours, minutes=minutes)
             moment = moment - offset if zone[0] == '+' else moment + offset
         return moment.timestamp() + (float('0.' + fraction) if fraction else 0.0)
     except (ValueError, OverflowError):
@@ -259,6 +352,20 @@ def _as_int(value: Any, default: int) -> int:
         return int(value)
     except (TypeError, ValueError):
         return default
+
+
+def _lifetime(value: Any) -> Optional[int]:
+    """Seconds remaining from a validate response; None when absent or malformed."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return int(value) if value == value and abs(value) != float('inf') else None
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
 
 
 def event_to_chat_event(event: Dict[str, Any], bot_user_id: str) -> Optional[ChatEvent]:
@@ -383,9 +490,15 @@ class TwitchChat(ChatReceiver):
         # (the operator replaced credentials) from an unchanged, older one.
         self._loaded_pair: Optional[Tuple[str, str]] = None
         self._snapshot: Optional[_Validated] = None
-        self._pending_refresh: Optional[Tuple[str, str]] = None
+        # Persistence queue for on_token_refresh: generation-numbered, drained
+        # in order by one dispatcher thread, never under the auth lock.
         self._callback_lock = threading.Lock()
+        self._refresh_queue: 'queue.Queue[Optional[Tuple[int, str, str]]]' = queue.Queue()
+        self._refresh_gen = 0
+        self._dispatcher: Optional[threading.Thread] = None
+        self._dispatched_gen = 0
         self._last_attempt: Optional[float] = None
+        self._next_recovery_at = 0.0
         self._auth_failed_at: Optional[float] = None
         self._auth_error_logged = False
         self._memory_only_noted = False
@@ -399,7 +512,18 @@ class TwitchChat(ChatReceiver):
         self._ws: Any = None
         self._seen: 'collections.OrderedDict[str, float]' = collections.OrderedDict()
         self._stale_logged = False
-        self._shared_chat_until = 0.0
+        self._cap_logged = False
+        self._reader_error_logged = False
+        self._stopped_cleanly = True
+        # Shared chat session state: 'unknown' | 'active' | 'inactive'. Only
+        # 'inactive' lets send() through. ``_shared_live`` means the shared-chat
+        # EventSub subscriptions are up on the current connection, so events keep
+        # the state current; without it every send asks Twitch.
+        self._shared_state = 'unknown'
+        self._shared_live = False
+        self._shared_gen = 0
+        self._shared_synced_at = 0.0
+        self._shared_last_try = -1e18
         self._sent_times: Deque[float] = collections.deque()
         self._send_blocked_until = 0.0
         self._last_thread_check = 0.0
@@ -462,31 +586,35 @@ class TwitchChat(ChatReceiver):
             logger.warning('Twitch %s request failed: %s', method.upper(), type(e).__name__)
             return None
 
-    def _validate(self, token: Optional[str]) -> Tuple[str, int]:
-        """('ok'|'invalid'|'bad'|'transient', expires_in). 'bad' = wrong account."""
+    def _validate(self, token: Optional[str]) -> Tuple[str, Optional[int]]:
+        """('ok'|'invalid'|'bad'|'transient', seconds_left). 'bad' = wrong account.
+
+        seconds_left is None when Twitch gave no usable ``expires_in`` (unknown
+        lifetime), and may be zero or negative (already expired).
+        """
         resp = self._request('get', VALIDATE_URL, headers={'Authorization': f'OAuth {token}'})
         if resp is None:
-            return 'transient', 0
+            return 'transient', None
         if resp.status_code == 401:
-            return 'invalid', 0
+            return 'invalid', None
         if resp.status_code != 200:
             logger.warning('Twitch auth validation returned HTTP %s', resp.status_code)
-            return 'transient', 0
+            return 'transient', None
         try:
             body = resp.json()
         except Exception:
-            return 'transient', 0
+            return 'transient', None
         if body.get('client_id') != self._creds['client_id']:
             self._fail_auth('the access token belongs to a different Twitch application')
-            return 'bad', 0
+            return 'bad', None
         if str(body.get('user_id')) != self._creds['bot_user_id']:
             self._fail_auth('the access token belongs to a different Twitch user than bot_user_id')
-            return 'bad', 0
+            return 'bad', None
         missing = [s for s in REQUIRED_SCOPES if s not in (body.get('scopes') or [])]
         if missing:
             self._fail_auth('the access token lacks scope(s): ' + ', '.join(missing))
-            return 'bad', 0
-        return 'ok', max(_as_int(body.get('expires_in'), 0), 0)
+            return 'bad', None
+        return 'ok', _lifetime(body.get('expires_in'))
 
     def _refresh(self) -> bool:
         """Swap in a refreshed pair as the in-memory candidate (not yet published)."""
@@ -514,41 +642,66 @@ class TwitchChat(ChatReceiver):
             return False
         self._mem_access = new_access
         self._mem_refresh = new_refresh
-        with self._callback_lock:
-            self._pending_refresh = (new_access, new_refresh)
+        self._enqueue_refresh(new_access, new_refresh)
         if self._on_token_refresh is None and not self._memory_only_noted:
             self._memory_only_noted = True
             logger.warning('Twitch tokens were refreshed and are held in memory only; the '
                            'stored copies are not updated (see docs/TWITCH_BOT.md).')
         return True
 
-    def _flush_refresh_callback(self) -> None:
-        """Hand a fresh pair to on_token_refresh, outside the adapter lock."""
-        with self._callback_lock:
-            pending, self._pending_refresh = self._pending_refresh, None
-        if pending is None or self._on_token_refresh is None:
+    def _enqueue_refresh(self, access: str, refresh: str) -> None:
+        """Queue a replacement pair for on_token_refresh, in generation order.
+
+        Every successful refresh is queued (nothing is coalesced) and one
+        dispatcher thread runs the callbacks in order, so a slow callback blocks
+        neither the receiver nor a sender, and an older pair never runs after a
+        newer one.
+        """
+        if self._on_token_refresh is None:
             return
-        try:
-            self._on_token_refresh(pending[0], pending[1])
-        except Exception as e:
-            logger.warning('Twitch refresh callback failed: %s', type(e).__name__)
+        with self._callback_lock:
+            self._refresh_gen += 1
+            self._refresh_queue.put((self._refresh_gen, access, refresh))
+            if self._dispatcher is None:
+                self._dispatcher = threading.Thread(
+                    target=self._run_refresh_callbacks, name='twitch-token-persist', daemon=True)
+                self._dispatcher.start()
+
+    def _run_refresh_callbacks(self) -> None:
+        callback = self._on_token_refresh
+        while True:
+            item = self._refresh_queue.get()
+            if item is None:
+                with self._callback_lock:
+                    if self._refresh_queue.empty():
+                        self._dispatcher = None  # decided under the lock that enqueue uses
+                        return
+                continue  # something was queued behind the stop marker
+            generation, access, refresh = item
+            if generation <= self._dispatched_gen or callback is None:
+                continue  # a stale generation never runs after a newer one
+            self._dispatched_gen = generation
+            try:
+                callback(access, refresh)
+            except Exception as e:
+                logger.warning('Twitch refresh callback failed: %s', type(e).__name__)
 
     def _ensure_auth(self, force: bool = False) -> bool:
         """True when the token is validated and fresh; heals within cooldowns."""
-        try:
-            with self._lock:
-                return self._ensure_auth_locked(force)
-        finally:
-            self._flush_refresh_callback()
+        with self._lock:
+            return self._ensure_auth_locked(force)
 
     def _ensure_auth_locked(self, force: bool) -> bool:
         now = self._clock()
         snap = self._snapshot
         recovering = False
         if self._auth_failed_at is not None:
-            if now - self._auth_failed_at < AUTH_COOLDOWN:
+            if now - self._auth_failed_at < AUTH_COOLDOWN or now < self._next_recovery_at:
                 return False
             recovering = True
+            # Advance the deadline before the attempt, whatever its outcome, so a
+            # recovery that fails transiently cannot be retried in a storm.
+            self._next_recovery_at = now + AUTH_COOLDOWN
         elif not force and snap is not None and self._fresh(snap, now):
             return True
         elif (not force and self._last_attempt is not None
@@ -564,27 +717,39 @@ class TwitchChat(ChatReceiver):
             except Exception as e:
                 logger.debug('Twitch cache reset failed: %s', type(e).__name__)
         if not self._load_credentials():
+            # Missing configuration is a failure like any other: it gets the
+            # same cooldown-guarded cache reset and re-read.
+            self._auth_failed_at = now
+            self._snapshot = None
             return False
 
-        verdict, expires = self._validate(self._mem_access)
+        started = self._clock()  # the deadline is anchored before the request
+        verdict, left = self._validate(self._mem_access)
         if verdict == 'invalid':
             self._snapshot = None  # Twitch says this token is dead
-        if verdict == 'invalid' or (verdict == 'ok' and 0 < expires < REFRESH_MARGIN):
+        if verdict == 'invalid' or (verdict == 'ok' and left is not None
+                                    and left < REFRESH_MARGIN):
             if self._refresh():
-                verdict, expires = self._validate(self._mem_access)
+                started = self._clock()
+                verdict, left = self._validate(self._mem_access)
                 if verdict == 'invalid':
                     self._snapshot = None
             elif verdict == 'invalid':
                 self._fail_auth('the access token is invalid and could not be refreshed')
                 return False
+            elif left is not None and left <= 0:
+                self._fail_auth('the access token has expired and could not be refreshed')
+                return False
+        if verdict == 'ok' and left is not None and left <= 0:
+            self._fail_auth('the access token is already expired after a refresh')
+            return False
         if verdict == 'ok':
-            done = self._clock()
             self._snapshot = _Validated(
                 access_token=self._mem_access or '',
                 client_id=self._creds['client_id'],
                 bot_user_id=self._creds['bot_user_id'],
-                validated_at=done,
-                expires_at=done + expires if expires else None)
+                validated_at=self._clock(),
+                expires_at=started + left if left is not None else None)
             self._auth_failed_at = None
             self._auth_error_logged = False
             return True
@@ -642,12 +807,27 @@ class TwitchChat(ChatReceiver):
                 logger.error('Twitch chat needs the "twitch" extra: pip install '
                              '"hypeman-social[twitch]"')
                 return False
+            if not self._reader_ok():
+                return False
             ok = self._ensure_auth()
             self._heal_thread()
             return ok
         except Exception as e:
             logger.warning('Twitch availability check failed: %s', type(e).__name__)
             return False
+
+    def _reader_ok(self) -> bool:
+        """False, with one clear error, when the default transport cannot be
+        made safe. An injected connector is the caller's own transport."""
+        if self._connect is not _default_connect:
+            return True
+        error = _reader_error()
+        if error is None:
+            return True
+        if not self._reader_error_logged:
+            self._reader_error_logged = True
+            logger.error('%s', error)
+        return False
 
     def _heal_thread(self) -> None:
         """Restart a receive thread that died, at most once per cooldown."""
@@ -675,22 +855,29 @@ class TwitchChat(ChatReceiver):
                                    'finished stopping')
                 return
             self._stop.clear()
+            self._reset_shared_state()
             self._spawn()
 
     def _spawn(self) -> None:
         self._thread = threading.Thread(target=self._serve, name='twitch-chat', daemon=True)
         self._thread.start()
 
-    # Reason for the override ignore below: ChatReceiver.stop returns None; a bool
-    # is a harmless widening for callers and reports an incomplete stop.
-    def stop(self) -> bool:  # type: ignore[override]
-        """Stop the receiver. False when the worker is still alive afterwards.
+    @property
+    def stopped_cleanly(self) -> bool:
+        """True unless the last ``stop()`` left the receiver or the token
+        persistence thread still running (``ChatReceiver.stop`` returns None, so
+        the outcome is reported here)."""
+        return self._stopped_cleanly
+
+    def stop(self) -> None:
+        """Stop the receiver and the persistence thread; see ``stopped_cleanly``.
 
         A worker stuck in a blocking connect cannot be interrupted from here. It
         is kept (not forgotten) so ``start()`` can refuse to run a second one;
         it exits by itself as soon as the connect returns.
         """
         self._stop.set()
+        clean = True
         ws = self._ws
         if ws is not None:
             try:
@@ -702,16 +889,37 @@ class TwitchChat(ChatReceiver):
             if thread is threading.current_thread():
                 logger.debug('Twitch stop() called from the receiver thread; it ends when '
                              'the handler returns')
-                return False
-            thread.join(timeout=self._stop_timeout)
-            if thread.is_alive():
-                logger.warning('Twitch chat shutdown incomplete: the receiver is still '
-                               'running (blocked connect?); start() is refused until it ends')
-                return False
-        with self._lock:
-            if self._thread is thread:
-                self._thread = None
-        self._ws = None
+                clean = False
+            else:
+                thread.join(timeout=self._stop_timeout)
+                if thread.is_alive():
+                    logger.warning('Twitch chat shutdown incomplete: the receiver is still '
+                                   'running (blocked connect?); start() is refused until it ends')
+                    clean = False
+        if not self._stop_dispatcher():
+            clean = False
+        if clean:
+            with self._lock:
+                if self._thread is thread:
+                    self._thread = None
+            self._ws = None
+        self._reset_shared_state()
+        self._stopped_cleanly = clean
+
+    def _stop_dispatcher(self) -> bool:
+        """Let queued refresh callbacks finish, then end the dispatcher thread."""
+        with self._callback_lock:
+            dispatcher = self._dispatcher
+            if dispatcher is None:
+                return True
+            self._refresh_queue.put(None)
+        if dispatcher is threading.current_thread():
+            return False
+        dispatcher.join(timeout=self._stop_timeout)
+        if dispatcher.is_alive():
+            logger.warning('Twitch chat shutdown incomplete: a token persistence callback '
+                           'is still running')
+            return False
         return True
 
     # ----- receive loop ---------------------------------------------------
@@ -791,13 +999,9 @@ class TwitchChat(ChatReceiver):
             keepalive = KEEPALIVE_SECONDS
         return sid, keepalive, session.get('reconnect_url')
 
-    def _subscribe(self, session_id: str) -> None:
-        body = {
-            'type': 'channel.chat.message', 'version': '1',
-            'condition': {'broadcaster_user_id': self._broadcaster_id,
-                          'user_id': self._creds['bot_user_id']},
-            'transport': {'method': 'websocket', 'session_id': session_id},
-        }
+    def _create_subscription(self, body: Dict[str, Any]) -> Optional[int]:
+        """POST one EventSub subscription; the HTTP status, None if no response.
+        A 401 gets one forced re-auth and retry. Raises _AuthLost if auth is gone."""
         for attempt in (0, 1):
             snap = self._auth_snapshot()
             if snap is None:
@@ -805,15 +1009,110 @@ class TwitchChat(ChatReceiver):
             resp = self._request('post', f'{HELIX}/eventsub/subscriptions',
                                  headers=self._auth_headers(snap), json=body)
             if resp is None:
-                raise _Transient('subscribe failed')
-            if resp.status_code == 202:
-                return
+                return None
             if resp.status_code == 401 and attempt == 0:
                 if self._ensure_auth(force=True):
                     continue
                 raise _AuthLost()
-            logger.warning('Twitch chat subscription refused: HTTP %s', resp.status_code)
-            raise _Transient('subscribe refused')
+            return int(resp.status_code)
+        return None
+
+    def _subscribe(self, session_id: str) -> None:
+        body = {
+            'type': 'channel.chat.message', 'version': '1',
+            'condition': {'broadcaster_user_id': self._broadcaster_id,
+                          'user_id': self._creds['bot_user_id']},
+            'transport': {'method': 'websocket', 'session_id': session_id},
+        }
+        status = self._create_subscription(body)
+        if status is None:
+            raise _Transient('subscribe failed')
+        if status == 202:
+            return
+        logger.warning('Twitch chat subscription refused: HTTP %s', status)
+        raise _Transient('subscribe refused')
+
+    def _subscribe_shared(self, session_id: str) -> bool:
+        """Subscribe to the shared-chat session begin/update/end events (version 1,
+        condition ``broadcaster_user_id``). True only when all three are up; if
+        not, the state cannot be trusted from events and every send asks Twitch."""
+        ok = True
+        for kind in SHARED_CHAT_TYPES:
+            body = {'type': kind, 'version': '1',
+                    'condition': {'broadcaster_user_id': self._broadcaster_id},
+                    'transport': {'method': 'websocket', 'session_id': session_id}}
+            status = self._create_subscription(body)
+            if status != 202:
+                logger.warning('Twitch shared-chat subscription refused: HTTP %s', status)
+                ok = False
+        return ok
+
+    # ----- shared chat session state --------------------------------------
+    #
+    # With a user access token Twitch delivers an outgoing message to every
+    # channel in a shared chat session and the local channel allowlist cannot
+    # stop that, so sends are refused unless the session state is known to be
+    # "not sharing". There is no timer: the state comes from the begin/update/end
+    # events, Get Shared Chat Session at start, after a reconnect and on the slow
+    # validation cadence, and anything uncertain counts as sharing.
+
+    def _reset_shared_state(self) -> None:
+        with self._lock:
+            self._shared_state = 'unknown'
+            self._shared_live = False
+            self._shared_gen += 1
+            self._shared_synced_at = 0.0
+
+    def _set_shared_state(self, state: str) -> None:
+        with self._lock:
+            self._shared_state = state
+            self._shared_gen += 1
+            self._shared_synced_at = self._clock()
+
+    def _resync_shared(self) -> str:
+        """Ask Twitch whether the channel is in a shared chat session."""
+        with self._lock:
+            generation = self._shared_gen
+            self._shared_last_try = self._clock()
+        state = 'unknown'
+        snap = self._auth_snapshot()
+        if snap is not None and self._broadcaster_id:
+            resp = self._request('get', f'{HELIX}/shared_chat/session',
+                                 headers=self._auth_headers(snap),
+                                 params={'broadcaster_id': self._broadcaster_id})
+            state = self._shared_verdict(resp)
+        with self._lock:
+            if self._shared_gen == generation:  # an event that raced us wins
+                self._shared_state = state
+                if state != 'unknown':
+                    self._shared_synced_at = self._clock()
+            return self._shared_state
+
+    @staticmethod
+    def _shared_verdict(resp: Any) -> str:
+        try:
+            if resp is None or resp.status_code != 200:
+                return 'unknown'
+            data = resp.json().get('data')
+        except Exception:
+            return 'unknown'
+        if not isinstance(data, list):
+            return 'unknown'
+        return 'active' if data else 'inactive'
+
+    def _shared_chat_clear(self) -> bool:
+        """True only when the channel is known not to be in a shared chat session."""
+        with self._lock:
+            now = self._clock()
+            live, state = self._shared_live, self._shared_state
+            if live and state == 'active':
+                return False
+            if (live and state == 'inactive'
+                    and now - self._shared_synced_at < 2 * VALIDATE_INTERVAL):
+                return True
+            if live and now - self._shared_last_try < ATTEMPT_COOLDOWN:
+                return False  # a recent resync failed; do not hammer Twitch
+        return self._resync_shared() == 'inactive'
 
     @staticmethod
     def _reconnect_url_ok(url: Any) -> bool:
@@ -836,8 +1135,9 @@ class TwitchChat(ChatReceiver):
 
     def _cycle(self) -> bool:
         """One connection, from connect to loss. True once it was subscribed."""
-        if not self._resolve_channel():
+        if not self._reader_ok() or not self._resolve_channel():
             return False
+        self._reset_shared_state()
         ws = self._connect(f'{EVENTSUB_URL}?keepalive_timeout_seconds={KEEPALIVE_SECONDS}',
                            WELCOME_TIMEOUT)
         self._ws = ws
@@ -852,13 +1152,18 @@ class TwitchChat(ChatReceiver):
                 return False
             try:
                 self._subscribe(sid)
+                shared_up = self._subscribe_shared(sid)
             except _AuthLost:
                 return False
             subscribed = True
+            with self._lock:
+                self._shared_live = shared_up
+            self._resync_shared()
             while not self._stop.is_set():
                 if not self._ensure_auth():
                     logger.warning('Twitch token no longer usable; closing the chat session')
                     return subscribed
+                self._maybe_resync_shared()
                 frame = self._recv(ws, keepalive + KEEPALIVE_GRACE)
                 if frame is None:
                     logger.warning('Twitch keepalive timeout; reconnecting')
@@ -869,6 +1174,8 @@ class TwitchChat(ChatReceiver):
                 if new_url:
                     ws = self._follow_reconnect(ws, new_url)
                     keepalive = self._keepalive
+                    self._set_shared_state('unknown')  # new link: resync before trusting
+                    self._resync_shared()
             return subscribed
         except _Transient as e:
             logger.warning('Twitch chat link lost: %s', e)
@@ -879,6 +1186,17 @@ class TwitchChat(ChatReceiver):
             except Exception as e:
                 logger.debug('Twitch websocket close failed: %s', type(e).__name__)
             self._ws = None
+            self._reset_shared_state()
+
+    def _maybe_resync_shared(self) -> None:
+        """Slow-cadence resync, and a retry of a failed one on the short cooldown."""
+        with self._lock:
+            now = self._clock()
+            due = (now - self._shared_synced_at >= VALIDATE_INTERVAL
+                   or (self._shared_state == 'unknown'
+                       and now - self._shared_last_try >= ATTEMPT_COOLDOWN))
+        if due:
+            self._resync_shared()
 
     def _follow_reconnect(self, old_ws: Any, url: str) -> Any:
         """Open the new link, wait for its welcome, then retire the old one."""
@@ -907,19 +1225,27 @@ class TwitchChat(ChatReceiver):
     def _first_sighting(self, message_id: str) -> bool:
         """Record a notification id; False when it was already seen in the window.
 
-        Bounded by time (REPLAY_WINDOW) and by size (SEEN_IDS). Older replays are
-        refused by their timestamp, so eviction cannot reopen them.
+        Every id is kept for SEEN_RETENTION (the replay window plus the future
+        skew), so a replay that still passes the timestamp checks is always
+        recognised. Only a very high hard cap (SEEN_IDS_CAP) can force an early
+        eviction; that drops the oldest id and is logged once.
         """
         now = self._clock()
-        cutoff = now - REPLAY_WINDOW
+        cutoff = now - SEEN_RETENTION
         seen_at = self._seen.get(message_id)
         if seen_at is not None and seen_at >= cutoff:
             return False
         self._seen.pop(message_id, None)
         while self._seen:
             oldest_at = next(iter(self._seen.values()))
-            if oldest_at < cutoff or len(self._seen) >= SEEN_IDS:
+            if oldest_at < cutoff:
                 self._seen.popitem(last=False)
+            elif len(self._seen) >= SEEN_IDS_CAP:
+                self._seen.popitem(last=False)
+                if not self._cap_logged:
+                    self._cap_logged = True
+                    logger.warning('Twitch notification id cache reached its cap; the replay '
+                                   'guarantee is weaker until traffic eases')
             else:
                 break
         self._seen[message_id] = now
@@ -934,7 +1260,8 @@ class TwitchChat(ChatReceiver):
             return str((payload.get('session') or {}).get('reconnect_url') or '') or None
         if kind == 'revocation':
             status = (payload.get('subscription') or {}).get('status')
-            logger.error('Twitch revoked the chat subscription (%s)', status)
+            shown = status if status in REVOCATION_STATUSES else 'unrecognised status'
+            logger.error('Twitch revoked the chat subscription (%s)', shown)
             if status == 'authorization_revoked':
                 with self._lock:
                     self._fail_auth('Twitch reports the authorization was revoked')
@@ -942,21 +1269,29 @@ class TwitchChat(ChatReceiver):
         if kind != 'notification':
             return None
         sent_at = _parse_timestamp(meta.get('message_timestamp'))
-        if sent_at is None or time.time() - sent_at > REPLAY_WINDOW:
+        age = time.time() - sent_at if sent_at is not None else None
+        if age is None or age > REPLAY_WINDOW or age < -FUTURE_SKEW:
             if not self._stale_logged:
                 self._stale_logged = True
-                logger.warning('Twitch notification dropped: timestamp missing or older than '
-                               '%d s (is this host clock right?)', int(REPLAY_WINDOW))
+                logger.warning('Twitch notification dropped: timestamp missing, older than '
+                               '%d s or more than %d s ahead (is this host clock right?)',
+                               int(REPLAY_WINDOW), int(FUTURE_SKEW))
             return None
         mid = str(meta.get('message_id') or '')
         if not mid or not self._first_sighting(mid):
             return None
-        if meta.get('subscription_type') != 'channel.chat.message':
-            return None
+        subscription_type = meta.get('subscription_type')
         event = payload.get('event')
         if not isinstance(event, dict):
             return None
         if str(event.get('broadcaster_user_id')) != str(self._broadcaster_id):
+            return None
+        if subscription_type in SHARED_CHAT_TYPES:
+            # begin and update mean a session is running; end means it is not.
+            self._set_shared_state(
+                'inactive' if subscription_type == 'channel.shared_chat.end' else 'active')
+            return None
+        if subscription_type != 'channel.chat.message':
             return None
         # Shared chat: Twitch delivers other participants' messages to this
         # channel with the origin in source_broadcaster_user_id (null for
@@ -964,7 +1299,7 @@ class TwitchChat(ChatReceiver):
         # a user-token send during such a session would reach all of them.
         source = event.get('source_broadcaster_user_id')
         if source not in (None, '') and str(source) != str(self._broadcaster_id):
-            self._shared_chat_until = self._clock() + SHARED_CHAT_QUIET
+            self._set_shared_state('active')  # direct evidence of a running session
             logger.debug('Twitch shared-chat message from another channel dropped')
             return None
         chat = event_to_chat_event(event, self._creds.get('bot_user_id', ''))
@@ -1013,14 +1348,14 @@ class TwitchChat(ChatReceiver):
         if not self._channel_matches(channel):
             logger.warning('Twitch send refused: not the configured channel')
             return False
-        if self._clock() < self._shared_chat_until:
-            logger.warning('Twitch send refused: a shared chat session was seen recently')
-            return False
         message = clip_message(text)
         if not message:
             return False
         if not self._allow_command_prefix and has_command_prefix(message):
             logger.warning('Twitch send refused: message starts with a command prefix')
+            return False
+        if not self._shared_chat_clear():
+            logger.warning('Twitch send refused: shared chat is active or its state is unknown')
             return False
         with self._lock:
             if not self._rate_ok():
@@ -1056,8 +1391,10 @@ class TwitchChat(ChatReceiver):
             return False
         if item.get('is_sent') is True:
             return True
-        drop = item.get('drop_reason') or {}
-        logger.warning('Twitch dropped the message: %s', drop.get('code', 'unknown'))
+        drop = item.get('drop_reason')
+        code = drop.get('code') if isinstance(drop, dict) else None
+        shown = code if isinstance(code, str) and code in DROP_CODES else 'unrecognised code'
+        logger.warning('Twitch dropped the message: %s', shown)
         return False
 
     def _retry_after(self, resp: Any) -> float:
