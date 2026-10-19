@@ -82,6 +82,15 @@ All notable changes to hypeman-social. The format follows
   separate bot account with its own Twitch application. Validates the token at
   start and hourly, refreshes it, and goes unavailable with one clear error if
   it cannot. New `twitch` extra (`websocket-client`). See `docs/TWITCH_BOT.md`.
+  Hardened after an adversarial review: shared-chat messages from other
+  channels are dropped; the newest rotated refresh token is never replaced by an
+  older stored one and an optional `on_token_refresh` callback lets the consumer
+  persist it; a replacement token is used only after validation and never past
+  its known expiry; a cooldown retry re-reads the secrets; stop/start cannot
+  leave two receivers; frames are bounded by encoded bytes before allocation;
+  handshake redirects and non-Twitch reconnect URLs are refused; control
+  characters and `/` or `.` command prefixes are refused on send; notifications
+  older than ten minutes are dropped.
 
 ## [0.3.4] — 2026-10-09
 

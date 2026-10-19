@@ -56,34 +56,72 @@ out. The broadcaster does not hand over any token.
 
 ## Token handling
 
-* At start, and on a schedule of 55 minutes (Twitch requires hourly), the token
-  is checked against `https://id.twitch.tv/oauth2/validate`. The adapter checks
-  that it belongs to the configured application and to `bot_user_id` and that it
+* At start, on a schedule of 55 minutes (Twitch requires hourly) and whenever
+  the expiry Twitch reported is within 15 minutes, the token is checked against
+  `https://id.twitch.tv/oauth2/validate`. The adapter keeps the absolute expiry
+  deadline from that answer and never treats the token as usable past it, even
+  while validation is failing for transient reasons. It also checks that the
+  token belongs to the configured application and to `bot_user_id` and that it
   carries both scopes.
 * A 401, or a token close to expiry, triggers a refresh with the refresh token.
-  If the refresh fails, the adapter becomes unavailable and logs one error. It
-  tries once more every 15 minutes, re-reading the secrets, so correcting the
-  values in Doppler heals it without a restart. It never retries in a loop.
-* **A refreshed token is held in memory only.** Writing it back would need a
-  Doppler token with write access, which this adapter deliberately does not ask
-  for. After a restart the stored tokens are read again. Twitch rotates refresh
-  tokens on every refresh; whether the previous refresh token stays usable is not
-  stated in the documentation I could read, so treat a restart after a long
-  uptime as a reason to regenerate the stored tokens if the bot comes up
-  unavailable.
+  A replacement access token is staged and only handed to senders after it has
+  passed validation; a replacement that fails validation (for example a token
+  for another user) is never used to send.
+* If the refresh fails, the adapter becomes unavailable and logs one error. It
+  tries once more every 15 minutes. That retry invalidates the cached secrets
+  (`reset_secret_cache()`, a re-fetch of the Doppler project) and re-reads them,
+  so correcting the values in Doppler heals it without a restart. It never
+  retries in a loop.
+* **Refresh tokens.** Twitch documents that a refresh token *may* change when it
+  is used, and that the application should store the replacement. The adapter
+  always keeps the newest pair in memory and uses it for the next refresh. On
+  recovery it adopts the stored pair only if the stored values differ from the
+  ones it read last time (the operator replaced them); an unchanged, older
+  stored pair never overwrites a newer one held in memory.
+* **Persisting a replacement.** Writing back to Doppler would need a Doppler
+  token with write access, which this adapter deliberately does not ask for and
+  has no code path for. Pass `on_token_refresh=callback(access_token,
+  refresh_token)` to `TwitchChat(...)` if the consumer wants to persist the new
+  pair somewhere secure. It runs after each successful refresh, outside the
+  adapter's lock; an exception from it is swallowed and logged by type only, and
+  the values are never logged by the adapter.
+* **What a restart does.** Without a callback the replacement lives in memory
+  only, so a restart reads the stored pair again. Whether the old refresh token
+  still works after Twitch has issued a replacement is not something I could
+  confirm in the documentation, so after a long uptime, or after a log line
+  saying the tokens were refreshed, treat an unavailable bot at startup as a
+  reason to regenerate the stored tokens (see Revoke and rotate).
 * Nothing logs a token, a client secret or an `Authorization` header, and
-  exception messages are logged by type only. A test enforces this.
+  exception messages are logged by type only. Sanitised internal exceptions are
+  raised outside the `except` block so they carry no `__context__` with the
+  original text. Tests enforce this.
 
-## Limits the adapter applies
+## Receiving: what is accepted
 
-* Messages are collapsed to one line and cut at 500 characters (the documented
-  Send Chat Message limit).
-* A local limiter allows 15 messages per 30 seconds and one every 1.5 seconds.
-  Twitch allows 20 per 30 seconds and one per second per channel for a sender
-  that is not the broadcaster, a moderator or a VIP, and ignores a bot that
-  exceeds them for an hour. When the limiter says no, `send()` returns `False`
-  at once; it never waits. A 429 response pauses sending for up to a minute.
-* The bot only sends to the channel it was configured for.
+* Only `channel.chat.message` notifications for the configured channel.
+* **Shared chat.** In a shared chat session Twitch delivers other participants'
+  messages to this channel with `source_broadcaster_user_id` set to the channel
+  they came from. These are dropped (not delivered with `bridged=False` and the
+  origin discarded). The choice is deliberate: the bot's conversation is the
+  configured channel's.
+* **Replay and duplicates.** Notifications whose `message_timestamp` is missing
+  or older than ten minutes (Twitch's own guidance for replay protection) are
+  dropped, and `message_id` values are remembered for that window, bounded by
+  time and by size (4096 ids). Delivery from Twitch is at-least-once, and the
+  id cache cannot cover a very busy channel forever, so **consumers should be
+  idempotent by `ChatEvent.message_id`**. If the host clock is more than ten
+  minutes fast, every message looks old and is dropped; one warning says so.
+* **Frame size.** A frame, or a fragmented message in total, over 1 MiB of
+  encoded bytes is refused as soon as its header declares the length (a
+  `websocket-client` subclass checks the length before the payload is read, and
+  the connection is dropped and re-established). Residual: an accepted 1 MiB
+  frame is buffered in memory, roughly two to four times that transiently while
+  it is joined and decoded. If `websocket-client` changes the internals this
+  relies on, the adapter falls back to the stock reader plus a byte-count check
+  after the whole frame has been read, which does not bound allocation.
+* **Connections.** Handshake redirects are not followed. A reconnect URL must be
+  `wss://eventsub.wss.twitch.tv`, port absent or 443, no user information, path
+  empty or `/ws` (the forms the EventSub documentation shows).
 
 ## Revoke and rotate
 
@@ -108,14 +146,19 @@ the application.
 ## What was and was not verified
 
 Read from dev.twitch.tv while writing this: the EventSub WebSocket handshake
-(welcome, keepalive, reconnect, revocation, close codes), the
-`channel.chat.message` event fields and `reply.parent_message_id`, Send Chat
-Message (endpoint, body, 500 character limit, `is_sent` and `drop_reason`,
-status codes), token validation and its hourly requirement, token refresh, the
-scope names, and the chat rate limits.
+(welcome, keepalive, reconnect, revocation, close codes), the reconnect URL form
+(`wss://eventsub.wss.twitch.tv?...`), the ten-minute replay guidance and
+`message_id` de-duplication on the EventSub overview, the
+`channel.chat.message` event fields, `reply.parent_message_id` and the
+`source_broadcaster_user_id` shared-chat fields, Send Chat Message (endpoint,
+body, 500 character limit, `is_sent` and `drop_reason`, status codes, and the
+shared-chat behaviour per token type), token validation and its hourly
+requirement, token refresh (including that refresh tokens may change), the scope
+names, and the chat rate limits.
 
 Not verified: the exact badge `set_id` strings (`broadcaster`, `moderator`,
 `subscriber`, `vip` are used; the pages I read gave only `bits` and `subscriber`
 as examples); whether the 500 limit counts code points or UTF-16 units;
-Twitch's duplicate-message rules; and the behaviour of an old refresh token
-after rotation. Nothing here was run against live Twitch.
+Twitch's duplicate-message rules; whether Twitch treats other leading
+characters than `/` and `.` as commands; and the behaviour of an old refresh
+token after a replacement is issued. Nothing here was run against live Twitch.
