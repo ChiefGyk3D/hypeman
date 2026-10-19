@@ -137,20 +137,47 @@ uses the default; it never stops startup. That includes the shared numeric
 settings these two providers inherit (`LLM_MAX_TOKENS`, `LLM_MAX_RETRIES`,
 `LLM_TEMPERATURE`, ...); the other providers still fail fast on a typo.
 
-**Where the key goes.** Both clients are always built with an explicit base URL
-(`https://api.anthropic.com`, `https://api.openai.com/v1`, or your validated
-`LLM_OPENAI_BASE_URL`), so the SDKs never fall back to `ANTHROPIC_BASE_URL` /
-`OPENAI_BASE_URL`. Redirects are disabled: a 3xx is an error, never followed
-with the key attached. The SDKs still read a few ambient variables that do not
-change the destination of the key and are left alone on purpose:
-`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` and `SSL_CERT_FILE` (a proxy or
-private CA is a legitimate on-prem need; only set them in an environment you
-trust), `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` (sent as headers to the pinned
-host), and `OPENAI_CUSTOM_HEADERS` / `ANTHROPIC_CUSTOM_HEADERS` (extra headers
-to the pinned host; they can replace an auth header, so keep them out of the
-environment you run hypeman in unless you set them). `ANTHROPIC_AUTH_TOKEN` and
-the Anthropic profile files are not consulted because the API key is passed
-explicitly.
+**Where the key goes.** What is guaranteed, and what is not:
+
+- Both clients are built with an explicit base URL (`https://api.anthropic.com`,
+  `https://api.openai.com/v1`, or your validated `LLM_OPENAI_BASE_URL`), so
+  `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` in the environment are never used.
+- Redirects are disabled: a 3xx is an error, never followed with the key.
+- The HTTP client ignores the process environment for network trust
+  (`trust_env=False`): `HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, `NO_PROXY`,
+  `SSL_CERT_FILE`, `SSL_CERT_DIR` and `REQUESTS_CA_BUNDLE` have no effect. Anyone
+  who controls those could otherwise terminate TLS for the pinned host with
+  their own CA and read the key. For a private proxy or CA use the settings
+  below; both are read by exact name (Doppler, then env) and an invalid value
+  makes that provider unavailable with one error naming the setting, never a
+  silent fallback to the environment.
+
+  | Variable | Meaning |
+  |---|---|
+  | `LLM_CLAUDE_PROXY` / `LLM_OPENAI_PROXY` | `http://` or `https://` proxy URL with a host. Credentials in the URL are refused (they would land in config and logs), as are query and fragment |
+  | `LLM_CLAUDE_CA_BUNDLE` / `LLM_OPENAI_CA_BUNDLE` | Path to a readable PEM file. It **replaces** the default trust store for that provider's client |
+
+- Not covered: someone who can set `LLM_*` settings, edit the config source
+  (Doppler project, `.env`), or run code in the process controls the key
+  anyway. The headers `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` and
+  `OPENAI_CUSTOM_HEADERS` / `ANTHROPIC_CUSTOM_HEADERS` are still read by the
+  SDKs and sent to the pinned host only (custom headers can replace an auth
+  header, so do not set them in this process's environment unless you mean to).
+  `ANTHROPIC_AUTH_TOKEN` and Anthropic profile files are not consulted because
+  the API key is passed explicitly.
+- Error handling: provider errors carry only a fixed safe reason (class,
+  status, "connection error", ...), never SDK text, and are raised after the
+  SDK handler exits so they have no chained exception on the provider's own
+  path. If *your* code calls the provider from inside an `except` block,
+  Python attaches that outer exception; the provider marks it suppressed so
+  formatted tracebacks do not print it, but the object stays reachable. Object
+  level secrecy is not claimed. The API key also stays on the provider
+  instance (reconnect needs it), so a traceback's frame locals or a debugger
+  can reach it; do not ship full-locals tracebacks (for example
+  `sentry` with `include_local_variables`) from this process.
+- Structured-output enums are limited to 256 plain-JSON options, 8 levels, 2000
+  nodes and 16,384 characters of strings and object keys in total; a larger enum
+  is refused before the call.
 
 The manager keeps re-probing a downed primary in the background and switches
 back automatically when it recovers — you stop paying for the cloud fallback

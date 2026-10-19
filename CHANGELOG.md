@@ -49,10 +49,22 @@ All notable changes to hypeman-social. The format follows
   none is configured), so `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` in the
   environment can no longer redirect the key, and redirects are disabled on
   both clients (the Anthropic SDK forwarded `X-Api-Key` across origins).
-- Provider errors are a context-free `ProviderError`: no `__context__` even
-  when raised inside an outer `except` or across an `await`, and a failing
+- **Network trust comes from settings, not the environment.** Both HTTP
+  clients use `trust_env=False`, so ambient `HTTPS_PROXY`/`ALL_PROXY`/
+  `SSL_CERT_FILE`/`SSL_CERT_DIR` can no longer route or re-trust the key's TLS
+  session. Private proxies and CAs are configured with
+  `LLM_CLAUDE_PROXY` / `LLM_OPENAI_PROXY` and `LLM_CLAUDE_CA_BUNDLE` /
+  `LLM_OPENAI_CA_BUNDLE`; an invalid value makes the provider unavailable.
+  Existing deployments that relied on ambient proxy variables must move them to
+  these settings.
+- Provider errors are a `ProviderError` with a fixed safe message, raised after
+  the SDK handler exits (no chained exception on the provider's own path,
+  suppressed in formatted output when a caller's handler is active). Object
+  level secrecy of a caller's own attached exception is not claimed, and the
+  API key remains reachable from frame locals; both are documented. A failing
   `status_code` on the SDK error degrades to a generic message.
-- Schema validation bounds enum size and depth (no `RecursionError`), and
+- Schema validation bounds enum size, depth and text before allocating (no
+  `RecursionError`, no large temporary stacks), and
   `integer` accepts integral floats such as `1.0`.
 - Invalid shared numeric settings (`MAX_TOKENS=oops`) no longer crash the
   Claude and OpenAI constructors.

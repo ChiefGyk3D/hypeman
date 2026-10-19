@@ -26,6 +26,7 @@ from hypeman_social.llm._cloud import (
     CloudProviderMixin,
     ProviderError,
     RateLimiter,
+    build_http_client,
     classify_sdk_error,
     cloud_setting,
     parse_number,
@@ -68,6 +69,7 @@ class ClaudeLLM(CloudProviderMixin, BaseLLM):
         self.client: Optional[Any] = None
         self.model: Optional[str] = None
         self.api_key: Optional[str] = None
+        self._read_transport_settings('CLAUDE')
 
         # Every setting below is read from its LLM_CLAUDE_* name only (see
         # cloud_setting): a bare CLAUDE_MODEL or CLAUDE_EFFORT in the ambient
@@ -107,6 +109,9 @@ class ClaudeLLM(CloudProviderMixin, BaseLLM):
         """
         if not CLAUDE_AVAILABLE:
             logger.error("✗ Anthropic client not installed. Run: pip install 'hypeman-social[claude]'")
+            return False
+
+        if self.transport_rejected:
             return False
 
         try:
@@ -149,19 +154,22 @@ class ClaudeLLM(CloudProviderMixin, BaseLLM):
         # base_url is always explicit: left unset, the SDK reads ANTHROPIC_BASE_URL
         # from the process environment and would send the key wherever that points.
         # Redirects are off because the SDK would forward X-Api-Key to a
-        # cross-origin Location; a Messages call never needs one. HTTP(S)_PROXY
-        # is still honoured (a legitimate on-prem need); see docs/CONFIGURATION.md.
+        # cross-origin Location; a Messages call never needs one. The HTTP client
+        # ignores proxy and CA variables in the environment (trust_env=False);
+        # LLM_CLAUDE_PROXY / LLM_CLAUDE_CA_BUNDLE are the explicit way in.
+        # self.api_key stays on the instance so reconnect can rebuild the client;
+        # a traceback's frame locals can therefore reach it.
         return anthropic.Anthropic(
             api_key=self.api_key,
             base_url=ANTHROPIC_DEFAULT_BASE_URL,
             timeout=self.timeout,
             max_retries=0,
-            http_client=anthropic.DefaultHttpxClient(follow_redirects=False),
+            http_client=build_http_client(self.proxy, self.ca_bundle),
         )
 
     def _reconnect(self) -> bool:
         """Rebuild the client; the API is stateless HTTP."""
-        if not CLAUDE_AVAILABLE or not self.api_key:
+        if not CLAUDE_AVAILABLE or not self.api_key or self.transport_rejected:
             return False
         try:
             old = self.client

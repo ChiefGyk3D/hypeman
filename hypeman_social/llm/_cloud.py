@@ -14,6 +14,7 @@ import ipaddress
 import json
 import logging
 import math
+import ssl
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -63,28 +64,24 @@ class RateLimiter:
 
 class ProviderError(RuntimeError):
     """
-    A key-free error that carries no exception context at all.
+    A provider failure whose message is only a safe, fixed-vocabulary reason.
 
-    ``raise X from None`` hides only __cause__ from a formatted traceback;
-    __context__ is still attached, and is also set when the caller is itself
-    inside an ``except`` block (including across an ``await``), where the
-    outer exception may hold a credential. Python writes __context__ at raise
-    time, so it cannot be cleared beforehand: this class reports None for it
-    and marks the context suppressed, whoever raised and wherever.
+    What is guaranteed: it is raised after the SDK handler has exited, so on the
+    provider's own call path it carries no __context__ and no __cause__, its
+    message never contains SDK error text, and it is marked
+    ``__suppress_context__`` so a formatted traceback prints no chained
+    exception even when the CALLER is inside an ``except`` block (or across an
+    ``await``) and Python attaches that outer exception at raise time.
+
+    What is not claimed: an exception object a caller's own handler attaches
+    stays reachable from ``__context__`` and could hold a credential. Object
+    level secrecy is not provided, only safe messages and safe formatting.
     """
 
     def __init__(self, message: str):
         super().__init__(message)
         self.__cause__ = None
         self.__suppress_context__ = True
-
-    @property
-    def __context__(self) -> None:  # type: ignore[override]  # shadows the C-level attribute on purpose
-        return None
-
-    @__context__.setter
-    def __context__(self, value: Any) -> None:
-        """Ignore the interpreter's attempt to attach the handled exception."""
 
 
 def classify_sdk_error(error: BaseException) -> str:
@@ -206,6 +203,54 @@ def validate_base_url(url: str) -> bool:
     return False
 
 
+def validate_proxy_url(url: str) -> bool:
+    """True for an http(s) proxy URL with a host, a sane port and no userinfo, query or fragment."""
+    if not url or any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in url):
+        return False
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+        _ = parts.port  # raises ValueError on a malformed port
+    except ValueError:
+        return False
+    return (
+        parts.scheme in ('http', 'https') and bool(host)
+        and '@' not in parts.netloc and parts.username is None and parts.password is None
+        and not parts.query and not parts.fragment and '?' not in url and '#' not in url
+    )
+
+
+def validate_ca_bundle(path: str) -> bool:
+    """True if ``path`` is a readable file that loads as a PEM CA bundle."""
+    try:
+        ssl.create_default_context(cafile=path)  # raises if missing, unreadable, a directory or not PEM
+        return True
+    except (OSError, ValueError, ssl.SSLError):
+        return False
+
+
+def build_http_client(proxy: Optional[str] = None, ca_bundle: Optional[str] = None) -> Any:
+    """
+    The HTTP client both cloud SDKs use, with trust taken only from settings.
+
+    trust_env=False: HTTP(S)_PROXY, ALL_PROXY, NO_PROXY and SSL_CERT_FILE/DIR in
+    the process environment are ignored, because anyone who controls them can
+    terminate TLS for the pinned host with their own CA and read the key. A
+    private proxy or CA is configured through LLM_<PROVIDER>_PROXY / _CA_BUNDLE
+    instead. A CA bundle REPLACES the default trust store. Redirects are off.
+    The SDKs' own DefaultHttpxClient is not used: Anthropic's reads proxy
+    variables itself even with trust_env=False.
+    """
+    import httpx2  # installed with both SDKs; imported late so the extras contract holds
+
+    kwargs: Dict[str, Any] = {'follow_redirects': False, 'trust_env': False}
+    if proxy:
+        kwargs['proxy'] = proxy
+    if ca_bundle:
+        kwargs['verify'] = ssl.create_default_context(cafile=ca_bundle)
+    return httpx2.Client(**kwargs)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Structured output: strict parse + local schema validation
 # ─────────────────────────────────────────────────────────────────────────────
@@ -219,6 +264,7 @@ _MAX_SCHEMA_DEPTH = 32
 _MAX_ENUM_OPTIONS = 256
 _MAX_ENUM_NODES = 2000
 _MAX_ENUM_DEPTH = 8
+_MAX_ENUM_TEXT = 16384  # characters of strings and object keys, in aggregate
 
 OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com'
@@ -255,26 +301,44 @@ def parse_strict_json(raw: str) -> Any:
 
 
 def _check_enum(options: Any) -> None:
-    """Bound an enum's size and nesting and allow only plain JSON values (iterative)."""
+    """
+    Bound an enum's size, nesting and text, allowing only plain JSON values.
+
+    Iterative with bounded auxiliary memory: a container is rejected from its
+    len() against the remaining node budget BEFORE any of it is iterated or
+    pushed, so a hostile 100,000-item list costs nothing.
+    """
     if not isinstance(options, list) or len(options) > _MAX_ENUM_OPTIONS:
         raise ValueError('enum must be a short list')
-    nodes = 0
+    nodes = len(options)  # every node is counted when it is queued
+    text = 0
     stack = [(option, 1) for option in options]
     while stack:
         value, depth = stack.pop()
-        nodes += 1
-        if nodes > _MAX_ENUM_NODES or depth > _MAX_ENUM_DEPTH:
-            raise ValueError('enum values too large or too deep')
-        if isinstance(value, dict):
-            if any(not isinstance(k, str) for k in value):
-                raise ValueError('enum object keys must be strings')
-            stack.extend((v, depth + 1) for v in value.values())
-        elif isinstance(value, list):
-            stack.extend((v, depth + 1) for v in value)
+        if depth > _MAX_ENUM_DEPTH:
+            raise ValueError('enum values too deep')
+        if isinstance(value, (dict, list)):
+            if nodes + len(value) > _MAX_ENUM_NODES:
+                raise ValueError('enum values too large')
+            nodes += len(value)
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if not isinstance(key, str):
+                        raise ValueError('enum object keys must be strings')
+                    text += len(key)
+                    if text > _MAX_ENUM_TEXT:
+                        raise ValueError('enum text too large')
+                    stack.append((child, depth + 1))
+            else:
+                stack.extend((child, depth + 1) for child in value)
+        elif isinstance(value, str):
+            text += len(value)
+            if text > _MAX_ENUM_TEXT:
+                raise ValueError('enum text too large')
         elif isinstance(value, float):
             if not math.isfinite(value):
                 raise ValueError('enum numbers must be finite')
-        elif value is not None and not isinstance(value, (bool, int, str)):
+        elif value is not None and not isinstance(value, (bool, int)):
             raise ValueError('enum values must be JSON values')
 
 
@@ -374,7 +438,32 @@ class CloudProviderMixin:
     degrade or fall back. The cloud providers route those reads through
     parse_number instead: a warning that names the setting, then the default.
     Other providers keep the strict behaviour.
+
+    It also reads the explicit transport settings (proxy, CA bundle).
     """
+
+    proxy: Optional[str]
+    ca_bundle: Optional[str]
+    transport_rejected: bool
+
+    def _read_transport_settings(self, provider: str) -> None:
+        """
+        Load LLM_<PROVIDER>_PROXY and LLM_<PROVIDER>_CA_BUNDLE. An invalid or
+        unreadable value is never used and never falls back to the environment:
+        ``transport_rejected`` makes authenticate() fail closed with one error
+        that names the setting (not its value).
+        """
+        self.proxy = cloud_setting(provider, 'proxy') or None
+        self.ca_bundle = cloud_setting(provider, 'ca_bundle') or None
+        self.transport_rejected = False
+        if self.proxy and not validate_proxy_url(self.proxy):
+            logger.error(
+                f"✗ LLM_{provider}_PROXY rejected (needs an http(s) URL with a host, "
+                "no credentials, query or fragment)")
+            self.proxy, self.transport_rejected = None, True
+        if self.ca_bundle and not validate_ca_bundle(self.ca_bundle):
+            logger.error(f"✗ LLM_{provider}_CA_BUNDLE rejected (not a readable file)")
+            self.ca_bundle, self.transport_rejected = None, True
 
     def _int_setting(self, key: str, default: int) -> int:
         return parse_number(

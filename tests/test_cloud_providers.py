@@ -744,7 +744,6 @@ def test_sanitized_error_has_no_context_or_cause(request, fixture_name):
     error = excinfo.value
     assert error.__context__ is None
     assert error.__cause__ is None
-    assert FAKE_KEY not in repr(error.__context__)
     assert FAKE_KEY not in ''.join(
         traceback.format_exception(type(error), error, error.__traceback__))
 
@@ -851,11 +850,11 @@ class Wire:
 
 def _real_provider(monkeypatch, which, wire):
     """The real SDK with its HTTP client swapped for the mock transport."""
-    mod = real_anthropic if which == 'claude' else real_openai
-    original = mod.DefaultHttpxClient
-    monkeypatch.setattr(
-        mod, 'DefaultHttpxClient',
-        lambda **kw: original(transport=httpx2.MockTransport(wire), **kw))
+    class MockedClient(httpx2.Client):  # subclass: the SDKs isinstance-check their http_client
+        def __init__(self, **kw):
+            super().__init__(**{**kw, 'transport': httpx2.MockTransport(wire)})
+
+    monkeypatch.setattr(httpx2, 'Client', MockedClient)
     if which == 'claude':
         monkeypatch.setattr(claude_mod, 'anthropic', real_anthropic)
         monkeypatch.setattr(claude_mod, 'CLAUDE_AVAILABLE', True)
@@ -927,11 +926,19 @@ def test_clients_are_built_without_redirects(request, which):
 # --- error context cannot leak a credential, whatever the call site -----------
 
 def _assert_clean(error):
-    assert error.__context__ is None
+    """
+    What is guaranteed for an error raised while a CALLER's handler is active:
+    the message is the safe one, and nothing key-bearing is printed, because the
+    caller's exception stays attached but suppressed. Object-level secrecy of
+    that attached exception is NOT claimed, so it is not asserted.
+    """
+    assert str(error) == 'unauthorized (401)'
     assert error.__cause__ is None
+    assert error.__suppress_context__ is True
+    assert FAKE_KEY not in str(error) + repr(error)
     text = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
     assert FAKE_KEY not in text
-    assert FAKE_KEY not in repr(error.__context__)
+    assert 'outer handler' not in text
 
 
 @pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
@@ -975,9 +982,13 @@ def test_a_failing_classifier_degrades_to_a_generic_error(request, fixture_name)
     llm.script.results = [BrokenStatusError(f'secret {FAKE_KEY}')]
     with pytest.raises(RuntimeError) as excinfo:
         llm._raw_generate('x', 10)
-    assert type(excinfo.value) is not ValueError
-    assert 'CLASSIFY' not in str(excinfo.value)
-    _assert_clean(excinfo.value)
+    error = excinfo.value
+    assert type(error) is not ValueError
+    assert str(error).startswith('unexpected provider error')
+    assert 'CLASSIFY' not in str(error)
+    # Raised on the provider's own path (no caller handler), so nothing is attached.
+    assert error.__context__ is None and error.__cause__ is None
+    assert FAKE_KEY not in ''.join(traceback.format_exception(type(error), error, error.__traceback__))
     assert 'CLASSIFY' not in ''.join(traceback.format_exception(
         type(excinfo.value), excinfo.value, excinfo.value.__traceback__))
 
@@ -1095,3 +1106,172 @@ def test_primary_name_is_normalised_before_the_comparison(monkeypatch):
     assert canonical_provider_name('OpenAI') == 'openai'
     monkeypatch.setenv('LLM_FALLBACK_PROVIDER', 'anthropic,openai')
     assert LLMManager._fallback_names(' CLAUDE ') == ['openai']
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Round 3: TLS trust and proxies come from explicit settings, never the environment
+# ─────────────────────────────────────────────────────────────────────────────
+
+HOSTILE_ENV = {
+    'HTTPS_PROXY': 'http://envproxy.invalid:3128', 'HTTP_PROXY': 'http://envproxy.invalid:3128',
+    'ALL_PROXY': 'http://envproxy.invalid:3128', 'https_proxy': 'http://envproxy.invalid:3128',
+    'SSL_CERT_FILE': '/nonexistent/attacker-ca.pem', 'SSL_CERT_DIR': '/nonexistent/attacker-cas',
+    'REQUESTS_CA_BUNDLE': '/nonexistent/attacker-ca.pem',
+}
+
+
+def _real_unmocked(monkeypatch, which, **env):
+    """A real provider and a real httpx2 client (no transport), with env vars set."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    if which == 'claude':
+        monkeypatch.setattr(claude_mod, 'anthropic', real_anthropic)
+        monkeypatch.setattr(claude_mod, 'CLAUDE_AVAILABLE', True)
+        monkeypatch.setenv('ANTHROPIC_API_KEY', FAKE_KEY)
+        return ClaudeLLM()
+    monkeypatch.setattr(openai_mod, 'openai', real_openai)
+    monkeypatch.setattr(openai_mod, 'OPENAI_AVAILABLE', True)
+    monkeypatch.setenv('OPENAI_API_KEY', FAKE_KEY)
+    return OpenAILLM()
+
+
+def _http(llm):
+    return llm.client._client
+
+
+@pytest.mark.parametrize('which', ['claude', 'openai'])
+def test_ambient_proxy_and_ca_variables_are_ignored(monkeypatch, which):
+    llm = _real_unmocked(monkeypatch, which, **HOSTILE_ENV)
+    assert llm.authenticate() is True, 'an attacker CA path in the environment must not matter'
+    http = _http(llm)
+    assert http.trust_env is False
+    assert http._mounts == {}, 'no proxy mount may come from the environment'
+
+
+@pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
+def test_explicit_proxy_setting_is_honoured(monkeypatch, which, prefix):
+    llm = _real_unmocked(monkeypatch, which, **{f'LLM_{prefix}_PROXY': 'http://proxy.example:3128'},
+                         HTTPS_PROXY='http://envproxy.invalid:3128')
+    assert llm.authenticate() is True
+    http = _http(llm)
+    assert len(http._mounts) == 1
+    proxy_transport = next(iter(http._mounts.values()))
+    assert 'proxy.example' in repr(vars(proxy_transport._pool)) or 'proxy.example' in str(
+        getattr(proxy_transport._pool, '_proxy_url', ''))
+
+
+@pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
+def test_explicit_ca_bundle_setting_is_honoured(monkeypatch, tmp_path, which, prefix):
+    import shutil
+    import ssl
+    bundle = tmp_path / 'ca.pem'
+    shutil.copy(ssl.get_default_verify_paths().cafile or '/etc/ssl/certs/ca-certificates.crt', bundle)
+    seen = []
+    original = ssl.create_default_context
+    monkeypatch.setattr(
+        'hypeman_social.llm._cloud.ssl.create_default_context',
+        lambda **kw: (seen.append(kw), original(**kw))[1])
+    llm = _real_unmocked(monkeypatch, which, **{f'LLM_{prefix}_CA_BUNDLE': str(bundle)},
+                         SSL_CERT_FILE='/nonexistent/attacker-ca.pem')
+    assert llm.authenticate() is True
+    assert seen and all(kw == {'cafile': str(bundle)} for kw in seen)
+    # The client really verifies with it (one load to validate, one to build the client).
+    assert len(seen) >= 2
+
+
+@pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
+@pytest.mark.parametrize('content', [None, 'not a certificate'])
+def test_missing_or_unusable_ca_bundle_makes_the_provider_unavailable(
+        monkeypatch, tmp_path, caplog, which, prefix, content):
+    path = tmp_path / 'ca.pem'
+    if content is not None:
+        path.write_text(content)
+    llm = _real_unmocked(monkeypatch, which, **{f'LLM_{prefix}_CA_BUNDLE': str(path)})
+    caplog.set_level(logging.DEBUG)
+    assert llm.authenticate() is False
+    assert llm.client is None
+    assert llm._reconnect() is False
+    assert llm.is_available() is False
+    assert llm.generate('x') is None
+    assert f'LLM_{prefix}_CA_BUNDLE' in caplog.text
+    assert str(path) not in caplog.text and FAKE_KEY not in caplog.text
+
+
+@pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
+@pytest.mark.parametrize('proxy', [
+    'ftp://proxy.example:3128', 'http://user:pw@proxy.example:3128', 'http:///x',
+    'proxy.example:3128', 'http://proxy.example:99999', 'http://proxy.example:3128/?a=1',
+    'http://proxy.example:3128\n'])
+def test_invalid_proxy_setting_makes_the_provider_unavailable(monkeypatch, caplog, which, prefix, proxy):
+    llm = _real_unmocked(monkeypatch, which, **{f'LLM_{prefix}_PROXY': proxy})
+    caplog.set_level(logging.DEBUG)
+    assert llm.authenticate() is False
+    assert llm.client is None
+    assert f'LLM_{prefix}_PROXY' in caplog.text
+    assert 'user:pw' not in caplog.text
+
+
+def test_a_directory_is_not_a_ca_bundle(monkeypatch, tmp_path):
+    llm = _real_unmocked(monkeypatch, 'openai', LLM_OPENAI_CA_BUNDLE=str(tmp_path))
+    assert llm.authenticate() is False
+
+
+# --- enum checks bound their own memory ---------------------------------------
+
+class TripwireList(list):
+    """A list that fails the test if anything iterates it."""
+
+    def __iter__(self):
+        raise AssertionError('iterated a container that exceeds the budget')
+
+
+class TripwireDict(dict):
+    def values(self):
+        raise AssertionError('iterated a container that exceeds the budget')
+
+    def keys(self):
+        raise AssertionError('iterated a container that exceeds the budget')
+
+    def __iter__(self):
+        raise AssertionError('iterated a container that exceeds the budget')
+
+
+def test_enum_rejects_an_oversized_container_before_iterating_it():
+    from hypeman_social.llm._cloud import check_schema_supported
+    big_list = TripwireList([0] * 100_000)
+    with pytest.raises(ValueError):
+        check_schema_supported({'enum': [big_list]})
+    big_dict = TripwireDict({str(i): 0 for i in range(100_000)})
+    with pytest.raises(ValueError):
+        check_schema_supported({'enum': [big_dict]})
+
+
+def test_enum_check_allocates_little_for_a_huge_container():
+    import tracemalloc
+
+    from hypeman_social.llm._cloud import check_schema_supported
+    huge = [0] * 1_000_000
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError):
+            check_schema_supported({'enum': [huge]})
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 200_000, peak
+
+
+@pytest.mark.parametrize('enum', [
+    ['x' * 100_000],                           # one huge string
+    [{'k' * 100_000: 1}],                      # one huge key
+    ['y' * 1000] * 200,                        # many strings, huge in aggregate
+])
+def test_enum_strings_and_keys_have_a_byte_budget(enum):
+    from hypeman_social.llm._cloud import check_schema_supported
+    with pytest.raises(ValueError):
+        check_schema_supported({'enum': enum})
+
+
+def test_modest_enums_still_pass():
+    from hypeman_social.llm._cloud import check_schema_supported
+    check_schema_supported({'enum': ['safe', 'unsafe', {'a': [1, 2.5, None, True]}]})

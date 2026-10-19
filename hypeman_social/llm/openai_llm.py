@@ -31,6 +31,7 @@ from hypeman_social.llm._cloud import (
     CloudProviderMixin,
     ProviderError,
     RateLimiter,
+    build_http_client,
     check_schema_supported,
     classify_sdk_error,
     cloud_setting,
@@ -74,6 +75,7 @@ class OpenAILLM(CloudProviderMixin, BaseLLM):
         self.client: Optional[Any] = None
         self.model: Optional[str] = None
         self.api_key: Optional[str] = None
+        self._read_transport_settings('OPENAI')
 
         # Every setting is read from its LLM_OPENAI_* name only (see
         # cloud_setting): an ambient OPENAI_BASE_URL or OPENAI_MODEL must not
@@ -117,7 +119,7 @@ class OpenAILLM(CloudProviderMixin, BaseLLM):
             logger.error("✗ OpenAI client not installed. Run: pip install 'hypeman-social[openai]'")
             return False
 
-        if self.base_url_rejected:
+        if self.base_url_rejected or self.transport_rejected:
             return False
 
         try:
@@ -157,17 +159,20 @@ class OpenAILLM(CloudProviderMixin, BaseLLM):
         # unset): left out, the SDK reads OPENAI_BASE_URL from the environment
         # and would send the key wherever that points. Redirects are off so a
         # 3xx can never carry the key (or the organization header) elsewhere.
-        # HTTP(S)_PROXY is still honoured; see docs/CONFIGURATION.md.
+        # The HTTP client ignores proxy and CA variables in the environment
+        # (trust_env=False); LLM_OPENAI_PROXY / LLM_OPENAI_CA_BUNDLE are the
+        # explicit way in. self.api_key stays on the instance so reconnect can
+        # rebuild the client; a traceback's frame locals can therefore reach it.
         return openai.OpenAI(
             api_key=self.api_key,
             base_url=self.base_url or OPENAI_DEFAULT_BASE_URL,
             timeout=self.timeout,
             max_retries=0,
-            http_client=openai.DefaultHttpxClient(follow_redirects=False),
+            http_client=build_http_client(self.proxy, self.ca_bundle),
         )
 
     def _reconnect(self) -> bool:
-        if not OPENAI_AVAILABLE or not self.api_key or self.base_url_rejected:
+        if not OPENAI_AVAILABLE or not self.api_key or self.base_url_rejected or self.transport_rejected:
             return False
         try:
             old = self.client
