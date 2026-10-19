@@ -76,6 +76,12 @@ All notable changes to hypeman-social. The format follows
 - Malformed numeric settings fall back to defaults with a warning instead of
   raising during provider construction; `claude` and `anthropic` dedupe in
   `LLM_FALLBACK_PROVIDER`.
+- **Twitch chat adapter** (`hypeman_social.social.twitch.TwitchChat`, registered
+  in the new `CHAT_REGISTRY`). Hears a channel over EventSub WebSocket
+  (`channel.chat.message`) and replies through Helix Send Chat Message, as a
+  separate bot account with its own Twitch application. Validates the token at
+  start and hourly, refreshes it, and goes unavailable with one clear error if
+  it cannot. New `twitch` extra (`websocket-client`). See `docs/TWITCH_BOT.md`.
 
 ## [0.3.4] — 2026-10-09
 

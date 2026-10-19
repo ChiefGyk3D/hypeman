@@ -16,9 +16,11 @@ from hypeman_social.social.base import (
 )
 from hypeman_social.social.bluesky import BlueskyPlatform
 from hypeman_social.social.discord import DiscordPlatform
+from hypeman_social.social.events import ChatEvent, ChatReceiver
 from hypeman_social.social.mastodon import MastodonPlatform
 from hypeman_social.social.matrix import MatrixPlatform
 from hypeman_social.social.threads import ThreadsPlatform
+from hypeman_social.social.twitch import TwitchChat
 
 #: Every platform hypeman can post to, by lowercase name.
 #:
@@ -32,7 +34,16 @@ REGISTRY = {
     'threads': ThreadsPlatform,
 }
 
+#: Every platform hypeman can hear and answer in, by lowercase name.
+CHAT_REGISTRY = {
+    'twitch': TwitchChat,
+}
+
 __all__ = [
+    'ChatEvent',
+    'ChatReceiver',
+    'CHAT_REGISTRY',
+    'TwitchChat',
     'SocialPlatform',
     'BlueskyPlatform',
     'MastodonPlatform',
