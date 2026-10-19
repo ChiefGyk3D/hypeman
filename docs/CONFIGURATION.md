@@ -10,6 +10,8 @@ authenticates or generates.
 - [LLM: provider selection and failover](#llm-provider-selection-and-failover)
 - [LLM: Ollama](#llm-ollama)
 - [LLM: Gemini](#llm-gemini)
+- [LLM: Claude](#llm-claude)
+- [LLM: OpenAI](#llm-openai)
 - [LLM: guardrails](#llm-guardrails)
 - [LLM: recovery](#llm-recovery)
 - [Social: Bluesky](#social-bluesky)
@@ -117,10 +119,10 @@ not spent on hidden reasoning.
 
 | Variable | Meaning | Default |
 |---|---|---|
-| `LLM_PROVIDER` | Primary provider: `ollama` or `gemini` | `gemini` |
+| `LLM_PROVIDER` | Primary provider: `ollama`, `gemini`, `claude` (alias `anthropic`) or `openai` | `gemini` |
 | `LLM_FALLBACK_PROVIDER` | Ordered, comma-separated failover chain, e.g. `gemini` or `gemini,ollama`. **Strictly opt-in**: if you chose Ollama so your data stays local, hypeman will never silently ship prompts to Google | *(none)* |
 | `LLM_MODEL` | Model name shared by all providers | provider default |
-| `LLM_OLLAMA_MODEL` / `LLM_GEMINI_MODEL` | Per-provider model; wins over `LLM_MODEL`. Needed whenever primary and fallback run different model names | provider default |
+| `LLM_OLLAMA_MODEL` / `LLM_GEMINI_MODEL` / `LLM_CLAUDE_MODEL` / `LLM_OPENAI_MODEL` | Per-provider model; wins over `LLM_MODEL`. Needed whenever primary and fallback run different model names | provider default |
 
 The manager keeps re-probing a downed primary in the background and switches
 back automatically when it recovers — you stop paying for the cloud fallback
@@ -150,6 +152,75 @@ Install extra: `hypeman-social[gemini]`.
 | `LLM_GEMINI_API_KEY` | API key (secret chain applies; `GEMINI_API_KEY` also accepted) | — |
 | `LLM_GEMINI_MODEL` | Model name | `gemini-2.0-flash-lite` |
 | `LLM_GEMINI_RATE_LIMIT` | Client-side requests/minute self-throttle, so you never discover the free-tier limit via 429s | `30` |
+
+## LLM: Claude
+
+Install extra: `hypeman-social[claude]`. Set `LLM_PROVIDER=claude` (or put
+`claude` in `LLM_FALLBACK_PROVIDER`). Built for high-volume chat, so the
+defaults are the cheap path.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `LLM_CLAUDE_API_KEY` | API key (secret chain applies, Doppler first; `ANTHROPIC_API_KEY` also accepted) | — |
+| `LLM_CLAUDE_MODEL` | `claude-haiku-5-5`, `claude-sonnet-5-5`, `claude-opus-5-5` or `claude-fable-5-1` | `claude-haiku-5-5` |
+| `LLM_CLAUDE_SYSTEM_PROMPT` | Stable persona/rules prefix sent as the system block. Keep it byte-identical between calls | *(none)* |
+| `LLM_CLAUDE_PROMPT_CACHE` | Put a `cache_control` breakpoint on the system block | `true` |
+| `LLM_CLAUDE_CACHE_TTL` | `5m` or `1h` | `5m` |
+| `LLM_CLAUDE_TIMEOUT` | Per-request timeout, seconds | `30` |
+| `LLM_CLAUDE_EFFORT_LEVEL` | `low`, `medium`, `high`, `xhigh`, `max`, or `omit` for the model default | `low` |
+| `LLM_CLAUDE_THINKING` | `auto`, `disabled`, `adaptive`, `between_tools`, `omit`. `auto` sends `disabled` on Haiku and omits it elsewhere (Sonnet and Opus 5.5 reject `disabled`) | `auto` |
+| `LLM_CLAUDE_RATE_LIMIT` | Client-side requests/minute self-throttle; `0` disables | `50` |
+
+What the options cost:
+
+- **Prompt caching** is the main saving when `LLM_CLAUDE_SYSTEM_PROMPT` is
+  long and calls are frequent: cache reads bill at about 0.1x the input rate,
+  the first write at 1.25x (5 minute TTL) or 2x (1 hour TTL). A prefix below
+  the model's minimum cacheable length silently does not cache, so a short
+  persona gains nothing; check `usage.cache_read_input_tokens`. Use `1h` only
+  when calls are minutes apart.
+- **Effort and thinking** spend output tokens. `low` effort with thinking off
+  keeps a chat reply near its visible length. Raising either costs output
+  tokens, billed at the output rate, and thinking shares the `max_tokens` cap.
+- **Sampling parameters** (`temperature`, `top_p`) are never sent, because
+  Haiku 5.5 and Sonnet 5.5 reject non-default values. `LLM_TEMPERATURE` and
+  `LLM_TOP_P` therefore do not apply to Claude; steer from the prompt.
+- Limits and retries: the SDK's own retries are off, so `LLM_MAX_RETRIES` and
+  `LLM_RETRY_DELAY_BASE` are the only retry layer. A safety decline
+  (`stop_reason: refusal`) returns no text, which the manager treats like any
+  other failed generation (next provider, or the template).
+
+Haiku 5.5 is $0.10 / $0.50 per million input / output tokens up to 100K
+prompt tokens; check the Anthropic pricing page before committing a budget.
+
+## LLM: OpenAI
+
+Install extra: `hypeman-social[openai]`. Uses the Responses API.
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `LLM_OPENAI_API_KEY` | API key (secret chain applies, Doppler first; `OPENAI_API_KEY` also accepted) | — |
+| `LLM_OPENAI_MODEL` | Model id | `gpt-6-luna` |
+| `LLM_OPENAI_SYSTEM_PROMPT` | Sent as `instructions` | *(none)* |
+| `LLM_OPENAI_REASONING_EFFORT` | `none`, `low`, `medium`, `high`, `xhigh`, `max`, or `omit` for the model default | `low` |
+| `LLM_OPENAI_TIMEOUT` | Per-request timeout, seconds | `30` |
+| `LLM_OPENAI_BASE_URL` | Only for an OpenAI-compatible gateway; unset uses OpenAI | *(none)* |
+| `LLM_OPENAI_RATE_LIMIT` | Client-side requests/minute self-throttle; `0` disables | `60` |
+
+Requests are sent with `store: false`, and `temperature`/`top_p` are not sent
+(current models do not document them). Reasoning tokens are billed as output
+tokens, so `low` keeps chat cheap; raise it only for work that needs it.
+`gpt-6-luna` is listed at $0.10 / $0.50 per million input / output tokens;
+check the OpenAI pricing page before committing a budget.
+
+**Structured output.** `OpenAILLM.generate_structured(prompt, schema, name)`
+sends a strict JSON schema and returns the parsed object, or `None`. `None`
+covers a model refusal, an incomplete (truncated) response, text that is not
+JSON, a non-object, and a missing `required` key. It never repairs or guesses,
+so a safety classifier should treat `None` as "no verdict" and fail closed.
+It shares availability, throttling, retry and error handling with
+`generate()`. Strict mode requires `additionalProperties: false` and every
+property listed in `required`. Schemas add a small first-call latency.
 
 ## LLM: guardrails
 

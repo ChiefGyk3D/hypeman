@@ -41,7 +41,9 @@ def _normalize_for_dedup(message: str) -> str:
 
 def build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
     """
-    Instantiate a provider by name ('ollama' or 'gemini').
+    Instantiate a provider by name ('ollama', 'gemini', 'claude' or 'openai').
+
+    'anthropic' is accepted as an alias for 'claude'.
 
     Public so daemons can pin a specific backend when they need to; most
     callers want LLMManager, which adds failover on top. Returns None for an
@@ -56,6 +58,14 @@ def build_provider(name: str, profile: ContentProfile) -> Optional[BaseLLM]:
     if name == 'gemini':
         from hypeman_social.llm.gemini import GeminiLLM
         return GeminiLLM(profile=profile)
+
+    if name in ('claude', 'anthropic'):
+        from hypeman_social.llm.claude import ClaudeLLM
+        return ClaudeLLM(profile=profile)
+
+    if name == 'openai':
+        from hypeman_social.llm.openai_llm import OpenAILLM
+        return OpenAILLM(profile=profile)
 
     if name in ('', 'none'):
         return None

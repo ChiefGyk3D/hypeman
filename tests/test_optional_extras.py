@@ -27,6 +27,8 @@ OPTIONAL_MODULES = [
     'mastodon',
     'ollama',
     'google',       # google-genai lives under the google namespace
+    'anthropic',
+    'openai',
     'boto3',
     'hvac',
     'dopplersdk',
@@ -112,12 +114,16 @@ def test_missing_extra_fails_closed_at_authenticate():
 
 
 def test_llm_providers_fail_closed_without_extras():
-    """OllamaLLM/GeminiLLM authenticate() must return False, not raise."""
+    """Every LLM provider's authenticate() must return False, not raise."""
     result = _run_with_extras_blocked("""
         from hypeman_social.llm.ollama import OllamaLLM
         from hypeman_social.llm.gemini import GeminiLLM
+        from hypeman_social.llm.claude import ClaudeLLM
+        from hypeman_social.llm.openai_llm import OpenAILLM
 
         assert OllamaLLM().authenticate() is False
         assert GeminiLLM().authenticate() is False
+        assert ClaudeLLM().authenticate() is False
+        assert OpenAILLM().authenticate() is False
     """)
     assert result.returncode == 0, result.stderr

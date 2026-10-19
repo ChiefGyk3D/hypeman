@@ -21,6 +21,18 @@ All notable changes to hypeman-social. The format follows
 ### Tests
 - Locked in that thinking-capable models get `think=false` when thinking mode
   is off (already the behaviour; no code change).
+### Added
+- **Claude provider** (`LLM_PROVIDER=claude`, alias `anthropic`, extra
+  `hypeman-social[claude]`). Defaults to `claude-haiku-5-5`, low effort,
+  thinking off on Haiku, prompt caching on the system block, a request
+  timeout, and a requests-per-minute limiter.
+- **OpenAI provider** (`LLM_PROVIDER=openai`, extra `hypeman-social[openai]`)
+  on the Responses API, with `generate_structured()` for strict JSON-schema
+  verdicts that return `None` on refusal, truncation, bad JSON or a missing
+  key, plus the same timeout and limiter options.
+- Both providers turn SDK errors into key-free messages the base class
+  retries or gives up on, and run the SDKs with their own retries off.
+- The `claude` and `openai` extras, both included in `all`.
 
 ## [0.3.4] — 2026-10-09
 
