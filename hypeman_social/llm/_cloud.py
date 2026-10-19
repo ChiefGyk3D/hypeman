@@ -19,7 +19,7 @@ import time
 from typing import Any, Callable, Dict, Optional
 from urllib.parse import urlsplit
 
-from hypeman_social.config.config import get_exact_config
+from hypeman_social.config.config import get_config, get_exact_config
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,41 @@ class RateLimiter:
             self._last_call = now
 
 
+class ProviderError(RuntimeError):
+    """
+    A key-free error that carries no exception context at all.
+
+    ``raise X from None`` hides only __cause__ from a formatted traceback;
+    __context__ is still attached, and is also set when the caller is itself
+    inside an ``except`` block (including across an ``await``), where the
+    outer exception may hold a credential. Python writes __context__ at raise
+    time, so it cannot be cleared beforehand: this class reports None for it
+    and marks the context suppressed, whoever raised and wherever.
+    """
+
+    def __init__(self, message: str):
+        super().__init__(message)
+        self.__cause__ = None
+        self.__suppress_context__ = True
+
+    @property
+    def __context__(self) -> None:  # type: ignore[override]  # shadows the C-level attribute on purpose
+        return None
+
+    @__context__.setter
+    def __context__(self, value: Any) -> None:
+        """Ignore the interpreter's attempt to attach the handled exception."""
+
+
 def classify_sdk_error(error: BaseException) -> str:
+    """Exception-safe wrapper: a hostile or broken error object yields a generic message."""
+    try:
+        return _classify(error)
+    except Exception:
+        return 'unexpected provider error'
+
+
+def _classify(error: BaseException) -> str:
     """
     Turn an SDK exception into a short, key-free message the base class can
     classify by substring.
@@ -182,6 +216,12 @@ _SUPPORTED_KEYWORDS = frozenset({
 })
 _TYPES = frozenset({'object', 'array', 'string', 'number', 'integer', 'boolean', 'null'})
 _MAX_SCHEMA_DEPTH = 32
+_MAX_ENUM_OPTIONS = 256
+_MAX_ENUM_NODES = 2000
+_MAX_ENUM_DEPTH = 8
+
+OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
+ANTHROPIC_DEFAULT_BASE_URL = 'https://api.anthropic.com'
 
 
 def _reject_constant(name: str) -> Any:
@@ -214,6 +254,30 @@ def parse_strict_json(raw: str) -> Any:
     )
 
 
+def _check_enum(options: Any) -> None:
+    """Bound an enum's size and nesting and allow only plain JSON values (iterative)."""
+    if not isinstance(options, list) or len(options) > _MAX_ENUM_OPTIONS:
+        raise ValueError('enum must be a short list')
+    nodes = 0
+    stack = [(option, 1) for option in options]
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_ENUM_NODES or depth > _MAX_ENUM_DEPTH:
+            raise ValueError('enum values too large or too deep')
+        if isinstance(value, dict):
+            if any(not isinstance(k, str) for k in value):
+                raise ValueError('enum object keys must be strings')
+            stack.extend((v, depth + 1) for v in value.values())
+        elif isinstance(value, list):
+            stack.extend((v, depth + 1) for v in value)
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise ValueError('enum numbers must be finite')
+        elif value is not None and not isinstance(value, (bool, int, str)):
+            raise ValueError('enum values must be JSON values')
+
+
 def check_schema_supported(schema: Any, _depth: int = 0) -> None:
     """Raise ValueError if the schema uses anything the local validator cannot enforce."""
     if _depth > _MAX_SCHEMA_DEPTH or not isinstance(schema, dict):
@@ -229,8 +293,8 @@ def check_schema_supported(schema: Any, _depth: int = 0) -> None:
     if 'required' in schema and not (
             isinstance(schema['required'], list) and all(isinstance(k, str) for k in schema['required'])):
         raise ValueError('required must be a list of strings')
-    if 'enum' in schema and not isinstance(schema['enum'], list):
-        raise ValueError('enum must be a list')
+    if 'enum' in schema:
+        _check_enum(schema['enum'])
     if 'additionalProperties' in schema and not isinstance(schema['additionalProperties'], bool):
         raise ValueError('additionalProperties must be a boolean')
     if 'properties' in schema:
@@ -267,6 +331,9 @@ def _type_ok(value: Any, name: str) -> bool:
     if name == 'null':
         return value is None
     if name == 'integer':
+        # JSON Schema: any number without a fractional part, so 1.0 and 1e0 count.
+        if isinstance(value, float):
+            return math.isfinite(value) and value.is_integer()
         return isinstance(value, int) and not isinstance(value, bool)
     return isinstance(value, (int, float)) and not isinstance(value, bool)  # number
 
@@ -296,3 +363,23 @@ def validate_against_schema(value: Any, schema: Dict[str, Any]) -> bool:
         if not all(validate_against_schema(item, schema['items']) for item in value):
             return False
     return True
+
+
+class CloudProviderMixin:
+    """
+    Defensive parsing of the shared BaseLLM numeric settings.
+
+    BaseLLM reads about a dozen LLM_* numbers with int()/float(), so one typo
+    (MAX_TOKENS=oops) would raise in the constructor, before the manager can
+    degrade or fall back. The cloud providers route those reads through
+    parse_number instead: a warning that names the setting, then the default.
+    Other providers keep the strict behaviour.
+    """
+
+    def _int_setting(self, key: str, default: int) -> int:
+        return parse_number(
+            f'LLM_{key.upper()}', get_config('LLM', key), default, integer=True, allow_zero=True)
+
+    def _float_setting(self, key: str, default: float) -> float:
+        return parse_number(
+            f'LLM_{key.upper()}', get_config('LLM', key), default, allow_zero=True)

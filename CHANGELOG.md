@@ -45,6 +45,17 @@ All notable changes to hypeman-social. The format follows
 - `generate_structured()` strictly parses (no duplicate keys, `NaN`,
   `Infinity`) and validates the result against the schema locally; a schema
   with unsupported keywords is refused before the call.
+- Both SDK clients now get an explicit base URL (the official endpoint when
+  none is configured), so `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` in the
+  environment can no longer redirect the key, and redirects are disabled on
+  both clients (the Anthropic SDK forwarded `X-Api-Key` across origins).
+- Provider errors are a context-free `ProviderError`: no `__context__` even
+  when raised inside an outer `except` or across an `await`, and a failing
+  `status_code` on the SDK error degrades to a generic message.
+- Schema validation bounds enum size and depth (no `RecursionError`), and
+  `integer` accepts integral floats such as `1.0`.
+- Invalid shared numeric settings (`MAX_TOKENS=oops`) no longer crash the
+  Claude and OpenAI constructors.
 - Sanitized provider errors no longer carry the SDK error as `__context__`.
 - Malformed numeric settings fall back to defaults with a warning instead of
   raising during provider construction; `claude` and `anthropic` dedupe in

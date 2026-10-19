@@ -21,7 +21,15 @@ from typing import Any, Dict, List, Optional
 
 from hypeman_social.config import get_secret
 from hypeman_social.config.config import get_exact_config
-from hypeman_social.llm._cloud import RateLimiter, classify_sdk_error, cloud_setting, parse_number
+from hypeman_social.llm._cloud import (
+    ANTHROPIC_DEFAULT_BASE_URL,
+    CloudProviderMixin,
+    ProviderError,
+    RateLimiter,
+    classify_sdk_error,
+    cloud_setting,
+    parse_number,
+)
 from hypeman_social.llm.base import BaseLLM
 from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
@@ -35,13 +43,22 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _close_quietly(client: Any) -> None:
+    """Release a replaced client's connection pool; never raises."""
+    try:
+        if client is not None:
+            client.close()
+    except Exception:  # best-effort cleanup of a client we are discarding anyway
+        pass
+
 DEFAULT_MODEL = 'claude-haiku-5-5'
 
 # 'auto' picks per model; the rest are sent as given.
 THINKING_MODES = ('auto', 'disabled', 'adaptive', 'between_tools', 'omit')
 
 
-class ClaudeLLM(BaseLLM):
+class ClaudeLLM(CloudProviderMixin, BaseLLM):
     """Claude Messages API generation with prompt caching and a client-side limiter."""
 
     provider_name = 'claude'
@@ -128,14 +145,28 @@ class ClaudeLLM(BaseLLM):
     def _build_client(self) -> Any:
         # max_retries=0: the base class owns retry and backoff. Leaving the
         # SDK's own retries on would multiply attempts and hide failures from it.
-        return anthropic.Anthropic(api_key=self.api_key, timeout=self.timeout, max_retries=0)
+        #
+        # base_url is always explicit: left unset, the SDK reads ANTHROPIC_BASE_URL
+        # from the process environment and would send the key wherever that points.
+        # Redirects are off because the SDK would forward X-Api-Key to a
+        # cross-origin Location; a Messages call never needs one. HTTP(S)_PROXY
+        # is still honoured (a legitimate on-prem need); see docs/CONFIGURATION.md.
+        return anthropic.Anthropic(
+            api_key=self.api_key,
+            base_url=ANTHROPIC_DEFAULT_BASE_URL,
+            timeout=self.timeout,
+            max_retries=0,
+            http_client=anthropic.DefaultHttpxClient(follow_redirects=False),
+        )
 
     def _reconnect(self) -> bool:
         """Rebuild the client; the API is stateless HTTP."""
         if not CLAUDE_AVAILABLE or not self.api_key:
             return False
         try:
+            old = self.client
             self.client = self._build_client()
+            _close_quietly(old)
             return True
         except Exception as e:
             self._last_error = type(e).__name__
@@ -197,7 +228,7 @@ class ClaudeLLM(BaseLLM):
         except Exception as e:
             failure = classify_sdk_error(e)
         if failure is not None:
-            raise RuntimeError(failure)
+            raise ProviderError(failure)
 
         # A safety decline is a normal 200; it is "no answer", not an error.
         if getattr(response, 'stop_reason', None) == 'refusal':

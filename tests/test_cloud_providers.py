@@ -9,6 +9,7 @@ No network and no real SDK calls: the module-level SDK handle is replaced
 with a fake whose client records requests and replays scripted responses.
 """
 
+import asyncio
 import json
 import logging
 import threading
@@ -82,7 +83,10 @@ def make_sdk(factory_name, attr, script):
         client = SimpleNamespace(**{attr: namespace})
         return client
 
-    return SimpleNamespace(**{factory_name: factory}), created
+    def http_client(**kwargs):  # fake of the SDK's DefaultHttpxClient
+        return SimpleNamespace(**kwargs)
+
+    return SimpleNamespace(**{factory_name: factory, 'DefaultHttpxClient': http_client}), created
 
 
 def claude_reply(text='hello there', stop_reason='end_turn'):
@@ -342,7 +346,7 @@ def test_openai_generate_happy_path(oai):
 def test_openai_client_has_timeout_and_no_sdk_retries(oai):
     assert oai.created[0]['timeout'] == 30.0
     assert oai.created[0]['max_retries'] == 0
-    assert 'base_url' not in oai.created[0]
+    assert oai.created[0]['base_url'] == 'https://api.openai.com/v1'
 
 
 def test_openai_system_prompt_goes_in_instructions(oai):
@@ -407,7 +411,7 @@ def test_openai_retry_and_permanent_classification(oai):
     assert len(oai.script.requests) == 1
 
 
-def test_openai_base_url_only_when_configured(monkeypatch):
+def test_openai_base_url_when_configured(monkeypatch):
     script = Script([])
     sdk, created = make_sdk('OpenAI', 'responses', script)
     monkeypatch.setattr(openai_mod, 'openai', sdk)
@@ -555,7 +559,7 @@ def test_ambient_bare_endpoint_alone_is_ignored(monkeypatch):
     created = _openai_sdk(monkeypatch)
     monkeypatch.setenv('OPENAI_BASE_URL', 'https://attacker.invalid/v1')
     assert OpenAILLM().authenticate() is True
-    assert 'base_url' not in created[0]
+    assert created[0]['base_url'] == 'https://api.openai.com/v1'
 
 
 def test_ambient_bare_model_and_settings_do_not_win(monkeypatch, claude):
@@ -591,6 +595,8 @@ def test_ambient_bare_model_and_settings_do_not_win(monkeypatch, claude):
     'https://gateway.example/\nv1',
     'javascript:alert(1)',
     'https://[::1',                        # unparseable
+    'https://gateway.example:99999/v1',    # port out of range
+    'https://gateway.example:abc/v1',      # non-numeric port
 ])
 def test_rejected_base_url_never_gets_the_credential(monkeypatch, caplog, url):
     created = _openai_sdk(monkeypatch)
@@ -804,3 +810,288 @@ def test_non_finite_numbers_are_rejected_even_where_a_number_is_allowed(oai, raw
               'required': ['score'], 'additionalProperties': False}
     oai.script.results = [openai_reply(raw)]
     assert oai.generate_structured('c', schema) is None
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Round 2: the real SDKs, with a mocked transport and hostile environments
+# ─────────────────────────────────────────────────────────────────────────────
+
+real_anthropic = pytest.importorskip('anthropic')
+real_openai = pytest.importorskip('openai')
+httpx2 = pytest.importorskip('httpx2')
+
+CLAUDE_BODY = {
+    'id': 'msg_1', 'type': 'message', 'role': 'assistant', 'model': 'claude-haiku-5-5',
+    'content': [{'type': 'text', 'text': 'hi from claude'}], 'stop_reason': 'end_turn',
+    'stop_sequence': None, 'usage': {'input_tokens': 1, 'output_tokens': 1},
+}
+OPENAI_BODY = {
+    'id': 'resp_1', 'object': 'response', 'status': 'completed', 'model': 'gpt-6-luna',
+    'output': [{'type': 'message', 'id': 'm1', 'role': 'assistant', 'status': 'completed',
+                'content': [{'type': 'output_text', 'text': 'hi from openai', 'annotations': []}]}],
+}
+
+
+class Wire:
+    """A mock transport that records every request the real SDK client sends."""
+
+    def __init__(self, body, redirect_to=None):
+        self.body, self.redirect_to, self.requests = body, redirect_to, []
+
+    def __call__(self, request):
+        self.requests.append(request)
+        if self.redirect_to and len(self.requests) == 1:
+            return httpx2.Response(307, headers={'location': self.redirect_to})
+        return httpx2.Response(200, json=self.body)
+
+    @property
+    def hosts(self):
+        return [r.url.host for r in self.requests]
+
+
+def _real_provider(monkeypatch, which, wire):
+    """The real SDK with its HTTP client swapped for the mock transport."""
+    mod = real_anthropic if which == 'claude' else real_openai
+    original = mod.DefaultHttpxClient
+    monkeypatch.setattr(
+        mod, 'DefaultHttpxClient',
+        lambda **kw: original(transport=httpx2.MockTransport(wire), **kw))
+    if which == 'claude':
+        monkeypatch.setattr(claude_mod, 'anthropic', real_anthropic)
+        monkeypatch.setattr(claude_mod, 'CLAUDE_AVAILABLE', True)
+        monkeypatch.setenv('ANTHROPIC_API_KEY', FAKE_KEY)
+        llm = ClaudeLLM()
+    else:
+        monkeypatch.setattr(openai_mod, 'openai', real_openai)
+        monkeypatch.setattr(openai_mod, 'OPENAI_AVAILABLE', True)
+        monkeypatch.setenv('OPENAI_API_KEY', FAKE_KEY)
+        llm = OpenAILLM()
+    llm.limiter = RateLimiter(0)
+    return llm
+
+
+REAL = [('claude', CLAUDE_BODY, 'api.anthropic.com'), ('openai', OPENAI_BODY, 'api.openai.com')]
+
+
+@pytest.mark.parametrize('which, body, official', REAL)
+def test_real_sdk_ignores_ambient_base_url_variables(monkeypatch, which, body, official):
+    for var in ('OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL'):
+        monkeypatch.setenv(var, 'http://attacker.invalid/v1')
+    wire = Wire(body)
+    llm = _real_provider(monkeypatch, which, wire)
+    assert llm.authenticate() is True
+    assert llm.generate('hello') is not None
+    assert wire.hosts == [official]
+    # A reconnect rebuilds the client; it must be pinned too.
+    assert llm._reconnect() is True
+    assert llm.generate('hello') is not None
+    assert wire.hosts == [official, official]
+
+
+@pytest.mark.parametrize('which, body, official', REAL)
+def test_real_sdk_does_not_follow_redirects_with_the_key(monkeypatch, which, body, official):
+    wire = Wire(body, redirect_to='http://attacker.invalid/capture')
+    llm = _real_provider(monkeypatch, which, wire)
+    assert llm.authenticate() is True
+    assert llm.generate('hello', max_retries=1) is None
+    assert wire.hosts == [official], 'the redirect target must never be contacted'
+
+
+@pytest.mark.parametrize('which, body, official', REAL)
+def test_real_sdk_sends_the_key_only_to_the_pinned_host(monkeypatch, which, body, official):
+    wire = Wire(body)
+    llm = _real_provider(monkeypatch, which, wire)
+    assert llm.authenticate() is True
+    llm.generate('hello')
+    request = wire.requests[0]
+    assert request.url.host == official
+    assert FAKE_KEY in (request.headers.get('x-api-key') or request.headers.get('authorization'))
+
+
+def test_real_openai_configured_gateway_is_used(monkeypatch):
+    wire = Wire(OPENAI_BODY)
+    monkeypatch.setenv('LLM_OPENAI_BASE_URL', 'https://gateway.example/v1')
+    monkeypatch.setenv('OPENAI_BASE_URL', 'http://attacker.invalid/v1')
+    llm = _real_provider(monkeypatch, 'openai', wire)
+    assert llm.authenticate() is True
+    llm.generate('hello')
+    assert wire.hosts == ['gateway.example']
+
+
+@pytest.mark.parametrize('which', ['claude', 'oai'])
+def test_clients_are_built_without_redirects(request, which):
+    llm = request.getfixturevalue(which)
+    assert llm.created[0]['http_client'].follow_redirects is False
+
+
+# --- error context cannot leak a credential, whatever the call site -----------
+
+def _assert_clean(error):
+    assert error.__context__ is None
+    assert error.__cause__ is None
+    text = ''.join(traceback.format_exception(type(error), error, error.__traceback__))
+    assert FAKE_KEY not in text
+    assert FAKE_KEY not in repr(error.__context__)
+
+
+@pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+def test_error_clean_inside_an_outer_except_block(request, fixture_name):
+    llm = request.getfixturevalue(fixture_name)
+    llm.script.results = [LeakyError()]
+    try:
+        raise ValueError(f'outer handler holds {FAKE_KEY}')
+    except ValueError:
+        with pytest.raises(RuntimeError) as excinfo:
+            llm._raw_generate('x', 10)
+    _assert_clean(excinfo.value)
+
+
+@pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+def test_error_clean_inside_an_async_handler(request, fixture_name):
+    llm = request.getfixturevalue(fixture_name)
+    llm.script.results = [LeakyError()]
+
+    async def go():
+        try:
+            raise ValueError(f'outer handler holds {FAKE_KEY}')
+        except ValueError:
+            await asyncio.sleep(0)
+            llm._raw_generate('x', 10)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(go())
+    _assert_clean(excinfo.value)
+
+
+class BrokenStatusError(Exception):
+    @property
+    def status_code(self):
+        raise ValueError(f'CLASSIFY-{FAKE_KEY}')
+
+
+@pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+def test_a_failing_classifier_degrades_to_a_generic_error(request, fixture_name):
+    llm = request.getfixturevalue(fixture_name)
+    llm.script.results = [BrokenStatusError(f'secret {FAKE_KEY}')]
+    with pytest.raises(RuntimeError) as excinfo:
+        llm._raw_generate('x', 10)
+    assert type(excinfo.value) is not ValueError
+    assert 'CLASSIFY' not in str(excinfo.value)
+    _assert_clean(excinfo.value)
+    assert 'CLASSIFY' not in ''.join(traceback.format_exception(
+        type(excinfo.value), excinfo.value, excinfo.value.__traceback__))
+
+
+# --- schema bounds and integers -----------------------------------------------
+
+def _deep_list(depth):
+    value = []
+    for _ in range(depth):
+        value = [value]
+    return value
+
+
+def test_deep_enum_values_are_refused_not_a_recursion_error(oai):
+    schema = {'type': 'object', 'properties': {'v': {'enum': [_deep_list(600)]}},
+              'required': ['v'], 'additionalProperties': False}
+    oai.script.results = [openai_reply('{"v": 1}')]
+    assert oai.generate_structured('c', schema) is None
+    assert oai.script.requests == []
+
+
+def test_oversized_enum_is_refused(oai):
+    schema = {'type': 'object', 'properties': {'v': {'enum': list(range(100000))}},
+              'required': ['v'], 'additionalProperties': False}
+    assert oai.generate_structured('c', schema) is None
+    assert oai.script.requests == []
+
+
+def test_recursion_error_in_validation_returns_none(oai):
+    oai.script.results = [openai_reply('{"verdict":true}')]
+    with patch.object(openai_mod, 'validate_against_schema', side_effect=RecursionError):
+        assert oai.generate_structured('c', BOOL_SCHEMA) is None
+
+
+def test_overly_deep_schema_is_refused(oai):
+    schema = {'type': 'string'}
+    for _ in range(40):
+        schema = {'type': 'object', 'properties': {'a': schema}}
+    oai.script.results = [openai_reply('{}')]
+    assert oai.generate_structured('c', schema) is None
+    assert oai.script.requests == []
+
+
+@pytest.mark.parametrize('keyword', [
+    '$ref', '$defs', 'oneOf', 'anyOf', 'allOf', 'not', 'pattern', 'minimum', 'maximum',
+    'minLength', 'maxLength', 'minItems', 'const', 'format', 'if', 'patternProperties'])
+def test_every_unsupported_keyword_is_refused(oai, keyword):
+    schema = dict(BOOL_SCHEMA, **{keyword: {'type': 'string'}})
+    oai.script.results = [openai_reply('{"verdict":true}')]
+    assert oai.generate_structured('c', schema) is None
+    assert oai.script.requests == []
+
+
+def test_enum_distinguishes_booleans_from_numbers(oai):
+    for enum, raw in (([1], '{"v": true}'), ([True], '{"v": 1}'), ([0], '{"v": false}'),
+                      ([False], '{"v": 0}')):
+        schema = {'type': 'object', 'properties': {'v': {'enum': enum}},
+                  'required': ['v'], 'additionalProperties': False}
+        oai.script.results = [openai_reply(raw)]
+        assert oai.generate_structured('c', schema) is None, (enum, raw)
+    schema = {'type': 'object', 'properties': {'v': {'enum': [True]}},
+              'required': ['v'], 'additionalProperties': False}
+    oai.script.results = [openai_reply('{"v": true}')]
+    assert oai.generate_structured('c', schema) == {'v': True}
+
+
+@pytest.mark.parametrize('raw, ok', [
+    ('1.0', True), ('1e0', True), ('3', True), ('-2.0', True),
+    ('1.5', False), ('true', False), ('"1"', False), ('null', False)])
+def test_integer_accepts_integral_json_numbers(raw, ok):
+    from hypeman_social.llm._cloud import parse_strict_json, validate_against_schema
+    assert validate_against_schema(parse_strict_json(raw), {'type': 'integer'}) is ok
+
+
+# --- configuration parsing ----------------------------------------------------
+
+def test_exact_config_reads_doppler_first_by_exact_name(monkeypatch):
+    from hypeman_social.config.config import get_exact_config
+    monkeypatch.setenv('DOPPLER_TOKEN', 'dp.test.fake')
+    monkeypatch.setenv('LLM_OPENAI_MODEL', 'env-model')
+    values = {'LLM_OPENAI_MODEL': 'doppler-model', 'OPENAI_BASE_URL': 'https://x.invalid/'}
+    with patch('hypeman_social.config.secrets._doppler_project_values', return_value=values):
+        assert get_exact_config('LLM_OPENAI_MODEL') == 'doppler-model'
+        assert get_exact_config('LLM_OPENAI_BASE_URL') is None  # bare Doppler key is not read
+
+
+def test_huge_integer_settings_fall_back_instead_of_overflowing(monkeypatch):
+    monkeypatch.setenv('LLM_OPENAI_RATE_LIMIT', '9' * 400)
+    monkeypatch.setenv('LLM_CLAUDE_RATE_LIMIT', '9' * 400)
+    assert OpenAILLM().rate_limit == 60
+    assert ClaudeLLM().rate_limit == 50
+
+
+def test_zero_openai_rate_limit_means_unlimited(monkeypatch):
+    monkeypatch.setenv('LLM_OPENAI_RATE_LIMIT', '0')
+    assert OpenAILLM().rate_limit == 0
+
+
+@pytest.mark.parametrize('var', [
+    'MAX_TOKENS', 'LLM_MAX_TOKENS', 'LLM_MAX_RETRIES', 'LLM_RETRY_DELAY_BASE', 'LLM_TEMPERATURE',
+    'LLM_TOP_P', 'LLM_RECONNECT_INTERVAL', 'LLM_DEDUP_CACHE_SIZE', 'LLM_THINKING_TOKEN_MULTIPLIER'])
+def test_shared_numeric_settings_cannot_crash_the_cloud_constructors(monkeypatch, caplog, var):
+    monkeypatch.setenv(var, 'oops')
+    caplog.set_level(logging.WARNING)
+    assert OpenAILLM().max_tokens == 150
+    assert ClaudeLLM().max_retries == 3
+    assert var in caplog.text
+
+
+# --- aliases ------------------------------------------------------------------
+
+def test_primary_name_is_normalised_before_the_comparison(monkeypatch):
+    from hypeman_social.llm.manager import canonical_provider_name
+    assert canonical_provider_name('  Anthropic ') == 'claude'
+    assert canonical_provider_name('OpenAI') == 'openai'
+    monkeypatch.setenv('LLM_FALLBACK_PROVIDER', 'anthropic,openai')
+    assert LLMManager._fallback_names(' CLAUDE ') == ['openai']

@@ -133,7 +133,24 @@ tooling cannot redirect the endpoint that receives your API key. `claude` and
 `anthropic` name the same provider, so listing both in
 `LLM_FALLBACK_PROVIDER` builds one client. A malformed number
 (`LLM_*_TIMEOUT`, `LLM_*_RATE_LIMIT`) logs a warning naming the setting and
-uses the default; it never stops startup.
+uses the default; it never stops startup. That includes the shared numeric
+settings these two providers inherit (`LLM_MAX_TOKENS`, `LLM_MAX_RETRIES`,
+`LLM_TEMPERATURE`, ...); the other providers still fail fast on a typo.
+
+**Where the key goes.** Both clients are always built with an explicit base URL
+(`https://api.anthropic.com`, `https://api.openai.com/v1`, or your validated
+`LLM_OPENAI_BASE_URL`), so the SDKs never fall back to `ANTHROPIC_BASE_URL` /
+`OPENAI_BASE_URL`. Redirects are disabled: a 3xx is an error, never followed
+with the key attached. The SDKs still read a few ambient variables that do not
+change the destination of the key and are left alone on purpose:
+`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` and `SSL_CERT_FILE` (a proxy or
+private CA is a legitimate on-prem need; only set them in an environment you
+trust), `OPENAI_ORG_ID` / `OPENAI_PROJECT_ID` (sent as headers to the pinned
+host), and `OPENAI_CUSTOM_HEADERS` / `ANTHROPIC_CUSTOM_HEADERS` (extra headers
+to the pinned host; they can replace an auth header, so keep them out of the
+environment you run hypeman in unless you set them). `ANTHROPIC_AUTH_TOKEN` and
+the Anthropic profile files are not consulted because the API key is passed
+explicitly.
 
 The manager keeps re-probing a downed primary in the background and switches
 back automatically when it recovers — you stop paying for the cloud fallback
@@ -229,7 +246,8 @@ sends a strict JSON schema and returns the parsed object, or `None`. `None`
 covers a model refusal, an incomplete (truncated) response, text that is not
 JSON (duplicate keys, `NaN` and `Infinity` count as invalid), and any
 mismatch with your schema, checked locally: `type`, `properties`, `required`,
-`additionalProperties`, `enum` and `items`. A schema using any other keyword
+`additionalProperties`, `enum` (at most 256 plain-JSON options, 8 levels deep)
+and `items`; `integer` accepts `1.0` and `1e0` as JSON Schema does. A schema using any other keyword
 (`pattern`, `minimum`, `oneOf`, ...) is refused before the call, because the
 result could not be verified. It never repairs or guesses,
 so a safety classifier should treat `None` as "no verdict" and fail closed.

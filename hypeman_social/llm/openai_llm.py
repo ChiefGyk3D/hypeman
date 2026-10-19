@@ -27,6 +27,9 @@ from typing import Any, Dict, Optional
 from hypeman_social.config import get_secret
 from hypeman_social.config.config import get_exact_config
 from hypeman_social.llm._cloud import (
+    OPENAI_DEFAULT_BASE_URL,
+    CloudProviderMixin,
+    ProviderError,
     RateLimiter,
     check_schema_supported,
     classify_sdk_error,
@@ -49,10 +52,19 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+def _close_quietly(client: Any) -> None:
+    """Release a replaced client's connection pool; never raises."""
+    try:
+        if client is not None:
+            client.close()
+    except Exception:  # best-effort cleanup of a client we are discarding anyway
+        pass
+
 DEFAULT_MODEL = 'gpt-6-luna'
 
 
-class OpenAILLM(BaseLLM):
+class OpenAILLM(CloudProviderMixin, BaseLLM):
     """OpenAI Responses API generation with an optional strict structured path."""
 
     provider_name = 'openai'
@@ -140,18 +152,27 @@ class OpenAILLM(BaseLLM):
 
     def _build_client(self) -> Any:
         # max_retries=0: the base class owns retry and backoff.
-        kwargs: Dict[str, Any] = {
-            'api_key': self.api_key, 'timeout': self.timeout, 'max_retries': 0,
-        }
-        if self.base_url:
-            kwargs['base_url'] = self.base_url
-        return openai.OpenAI(**kwargs)
+        #
+        # base_url is always explicit and validated (the official endpoint when
+        # unset): left out, the SDK reads OPENAI_BASE_URL from the environment
+        # and would send the key wherever that points. Redirects are off so a
+        # 3xx can never carry the key (or the organization header) elsewhere.
+        # HTTP(S)_PROXY is still honoured; see docs/CONFIGURATION.md.
+        return openai.OpenAI(
+            api_key=self.api_key,
+            base_url=self.base_url or OPENAI_DEFAULT_BASE_URL,
+            timeout=self.timeout,
+            max_retries=0,
+            http_client=openai.DefaultHttpxClient(follow_redirects=False),
+        )
 
     def _reconnect(self) -> bool:
-        if not OPENAI_AVAILABLE or not self.api_key:
+        if not OPENAI_AVAILABLE or not self.api_key or self.base_url_rejected:
             return False
         try:
+            old = self.client
             self.client = self._build_client()
+            _close_quietly(old)
             return True
         except Exception as e:
             self._last_error = type(e).__name__
@@ -194,7 +215,7 @@ class OpenAILLM(BaseLLM):
         except Exception as e:
             failure = classify_sdk_error(e)
         if failure is not None:
-            raise RuntimeError(failure)
+            raise ProviderError(failure)
 
         structured = getattr(self._local, 'schema', None) is not None
 
@@ -233,7 +254,7 @@ class OpenAILLM(BaseLLM):
         """
         try:
             check_schema_supported(schema)
-        except ValueError:
+        except (ValueError, RecursionError):
             logger.warning("⚠ Structured schema uses unsupported keywords; refusing to call")
             return None
 
@@ -250,7 +271,11 @@ class OpenAILLM(BaseLLM):
         except (ValueError, RecursionError):
             logger.warning("⚠ OpenAI structured output was not strict JSON; treating as refusal")
             return None
-        if not isinstance(data, dict) or not validate_against_schema(data, schema):
+        try:
+            valid = isinstance(data, dict) and validate_against_schema(data, schema)
+        except RecursionError:
+            valid = False
+        if not valid:
             logger.warning("⚠ OpenAI structured output did not match the schema; treating as refusal")
             return None
         return data
