@@ -210,7 +210,7 @@ Install extra: `hypeman-social[gemini]`.
 
 ## LLM: Claude
 
-Install extra: `hypeman-social[claude]`. Set `LLM_PROVIDER=claude` (or put
+Install extra: `hypeman-social[claude]` (the Anthropic SDK needs Python 3.10 or newer; on 3.9 the extra installs nothing and the provider reports itself unavailable). Set `LLM_PROVIDER=claude` (or put
 `claude` in `LLM_FALLBACK_PROVIDER`). Built for high-volume chat, so the
 defaults are the cheap path.
 
@@ -250,7 +250,7 @@ prompt tokens; check the Anthropic pricing page before committing a budget.
 
 ## LLM: OpenAI
 
-Install extra: `hypeman-social[openai]`. Uses the Responses API.
+Install extra: `hypeman-social[openai]` (the OpenAI SDK needs Python 3.10 or newer; on 3.9 the extra installs nothing and the provider reports itself unavailable). Uses the Responses API.
 
 | Variable | Meaning | Default |
 |---|---|---|

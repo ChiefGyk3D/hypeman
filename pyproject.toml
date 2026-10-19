@@ -39,8 +39,9 @@ bluesky   = ["atproto>=0.0.55", "grapheme>=0.6.0", "beautifulsoup4>=4.12.0"]
 mastodon  = ["Mastodon.py>=1.8.1"]
 ollama    = ["ollama>=0.3.0"]
 gemini    = ["google-genai>=0.3.0"]
-claude    = ["anthropic>=1.15.0"]
-openai    = ["openai>=3.35.0"]
+# The anthropic 1.x and openai 3.x SDKs require Python 3.10+; the providers fail closed without them.
+claude    = ["anthropic>=1.15.0; python_version >= '3.10'"]
+openai    = ["openai>=3.35.0; python_version >= '3.10'"]
 aws       = ["boto3>=1.34.0"]
 vault     = ["hvac>=2.1.0"]
 doppler   = ["doppler-sdk>=1.3.0"]
@@ -53,8 +54,8 @@ all = [
     "Mastodon.py>=1.8.1",
     "ollama>=0.3.0",
     "google-genai>=0.3.0",
-    "anthropic>=1.15.0",
-    "openai>=3.35.0",
+    "anthropic>=1.15.0; python_version >= '3.10'",
+    "openai>=3.35.0; python_version >= '3.10'",
 ]
 
 dev = [

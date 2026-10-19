@@ -117,6 +117,20 @@ def _no_sleep_and_clean_env(monkeypatch):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _stub_http_client_without_the_sdks(monkeypatch):
+    """On Python 3.9 the SDKs (and the httpx2 they bring) are not installed.
+
+    The fake-SDK tests below never open a connection, so give the providers a
+    placeholder client there. With the real httpx2 present nothing is replaced.
+    """
+    try:
+        import httpx2  # noqa: F401  (presence check only)
+    except ImportError:
+        monkeypatch.setattr(claude_mod, 'build_http_client', lambda *a, **k: None)
+        monkeypatch.setattr(openai_mod, 'build_http_client', lambda *a, **k: None)
+
+
 @pytest.fixture
 def claude(monkeypatch):
     script = Script([claude_reply()])
@@ -815,9 +829,19 @@ def test_non_finite_numbers_are_rejected_even_where_a_number_is_allowed(oai, raw
 # Round 2: the real SDKs, with a mocked transport and hostile environments
 # ─────────────────────────────────────────────────────────────────────────────
 
-real_anthropic = pytest.importorskip('anthropic')
-real_openai = pytest.importorskip('openai')
-httpx2 = pytest.importorskip('httpx2')
+# The 1.x anthropic and 3.x openai SDKs need Python 3.10+, so on 3.9 they are not
+# installed (see the extras in pyproject.toml). The tests above use fakes and run
+# everywhere; the ones below drive the real SDKs and are skipped without them.
+try:
+    import anthropic as real_anthropic
+    import httpx2
+    import openai as real_openai
+    HAVE_REAL_SDKS = True
+except ImportError:
+    HAVE_REAL_SDKS = False
+
+requires_real_sdks = pytest.mark.skipif(
+    not HAVE_REAL_SDKS, reason='needs the anthropic and openai SDKs (Python 3.10+)')
 
 CLAUDE_BODY = {
     'id': 'msg_1', 'type': 'message', 'role': 'assistant', 'model': 'claude-haiku-5-5',
@@ -873,6 +897,7 @@ REAL = [('claude', CLAUDE_BODY, 'api.anthropic.com'), ('openai', OPENAI_BODY, 'a
 
 
 @pytest.mark.parametrize('which, body, official', REAL)
+@requires_real_sdks
 def test_real_sdk_ignores_ambient_base_url_variables(monkeypatch, which, body, official):
     for var in ('OPENAI_BASE_URL', 'ANTHROPIC_BASE_URL'):
         monkeypatch.setenv(var, 'http://attacker.invalid/v1')
@@ -888,6 +913,7 @@ def test_real_sdk_ignores_ambient_base_url_variables(monkeypatch, which, body, o
 
 
 @pytest.mark.parametrize('which, body, official', REAL)
+@requires_real_sdks
 def test_real_sdk_does_not_follow_redirects_with_the_key(monkeypatch, which, body, official):
     wire = Wire(body, redirect_to='http://attacker.invalid/capture')
     llm = _real_provider(monkeypatch, which, wire)
@@ -897,6 +923,7 @@ def test_real_sdk_does_not_follow_redirects_with_the_key(monkeypatch, which, bod
 
 
 @pytest.mark.parametrize('which, body, official', REAL)
+@requires_real_sdks
 def test_real_sdk_sends_the_key_only_to_the_pinned_host(monkeypatch, which, body, official):
     wire = Wire(body)
     llm = _real_provider(monkeypatch, which, wire)
@@ -907,6 +934,7 @@ def test_real_sdk_sends_the_key_only_to_the_pinned_host(monkeypatch, which, body
     assert FAKE_KEY in (request.headers.get('x-api-key') or request.headers.get('authorization'))
 
 
+@requires_real_sdks
 def test_real_openai_configured_gateway_is_used(monkeypatch):
     wire = Wire(OPENAI_BODY)
     monkeypatch.setenv('LLM_OPENAI_BASE_URL', 'https://gateway.example/v1')
@@ -918,6 +946,7 @@ def test_real_openai_configured_gateway_is_used(monkeypatch):
 
 
 @pytest.mark.parametrize('which', ['claude', 'oai'])
+@requires_real_sdks
 def test_clients_are_built_without_redirects(request, which):
     llm = request.getfixturevalue(which)
     assert llm.created[0]['http_client'].follow_redirects is False
@@ -942,6 +971,7 @@ def _assert_clean(error):
 
 
 @pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+@requires_real_sdks
 def test_error_clean_inside_an_outer_except_block(request, fixture_name):
     llm = request.getfixturevalue(fixture_name)
     llm.script.results = [LeakyError()]
@@ -954,6 +984,7 @@ def test_error_clean_inside_an_outer_except_block(request, fixture_name):
 
 
 @pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+@requires_real_sdks
 def test_error_clean_inside_an_async_handler(request, fixture_name):
     llm = request.getfixturevalue(fixture_name)
     llm.script.results = [LeakyError()]
@@ -977,6 +1008,7 @@ class BrokenStatusError(Exception):
 
 
 @pytest.mark.parametrize('fixture_name', ['claude', 'oai'])
+@requires_real_sdks
 def test_a_failing_classifier_degrades_to_a_generic_error(request, fixture_name):
     llm = request.getfixturevalue(fixture_name)
     llm.script.results = [BrokenStatusError(f'secret {FAKE_KEY}')]
@@ -1002,6 +1034,7 @@ def _deep_list(depth):
     return value
 
 
+@requires_real_sdks
 def test_deep_enum_values_are_refused_not_a_recursion_error(oai):
     schema = {'type': 'object', 'properties': {'v': {'enum': [_deep_list(600)]}},
               'required': ['v'], 'additionalProperties': False}
@@ -1010,6 +1043,7 @@ def test_deep_enum_values_are_refused_not_a_recursion_error(oai):
     assert oai.script.requests == []
 
 
+@requires_real_sdks
 def test_oversized_enum_is_refused(oai):
     schema = {'type': 'object', 'properties': {'v': {'enum': list(range(100000))}},
               'required': ['v'], 'additionalProperties': False}
@@ -1017,12 +1051,14 @@ def test_oversized_enum_is_refused(oai):
     assert oai.script.requests == []
 
 
+@requires_real_sdks
 def test_recursion_error_in_validation_returns_none(oai):
     oai.script.results = [openai_reply('{"verdict":true}')]
     with patch.object(openai_mod, 'validate_against_schema', side_effect=RecursionError):
         assert oai.generate_structured('c', BOOL_SCHEMA) is None
 
 
+@requires_real_sdks
 def test_overly_deep_schema_is_refused(oai):
     schema = {'type': 'string'}
     for _ in range(40):
@@ -1035,6 +1071,7 @@ def test_overly_deep_schema_is_refused(oai):
 @pytest.mark.parametrize('keyword', [
     '$ref', '$defs', 'oneOf', 'anyOf', 'allOf', 'not', 'pattern', 'minimum', 'maximum',
     'minLength', 'maxLength', 'minItems', 'const', 'format', 'if', 'patternProperties'])
+@requires_real_sdks
 def test_every_unsupported_keyword_is_refused(oai, keyword):
     schema = dict(BOOL_SCHEMA, **{keyword: {'type': 'string'}})
     oai.script.results = [openai_reply('{"verdict":true}')]
@@ -1042,6 +1079,7 @@ def test_every_unsupported_keyword_is_refused(oai, keyword):
     assert oai.script.requests == []
 
 
+@requires_real_sdks
 def test_enum_distinguishes_booleans_from_numbers(oai):
     for enum, raw in (([1], '{"v": true}'), ([True], '{"v": 1}'), ([0], '{"v": false}'),
                       ([False], '{"v": 0}')):
@@ -1058,6 +1096,7 @@ def test_enum_distinguishes_booleans_from_numbers(oai):
 @pytest.mark.parametrize('raw, ok', [
     ('1.0', True), ('1e0', True), ('3', True), ('-2.0', True),
     ('1.5', False), ('true', False), ('"1"', False), ('null', False)])
+@requires_real_sdks
 def test_integer_accepts_integral_json_numbers(raw, ok):
     from hypeman_social.llm._cloud import parse_strict_json, validate_against_schema
     assert validate_against_schema(parse_strict_json(raw), {'type': 'integer'}) is ok
@@ -1065,6 +1104,7 @@ def test_integer_accepts_integral_json_numbers(raw, ok):
 
 # --- configuration parsing ----------------------------------------------------
 
+@requires_real_sdks
 def test_exact_config_reads_doppler_first_by_exact_name(monkeypatch):
     from hypeman_social.config.config import get_exact_config
     monkeypatch.setenv('DOPPLER_TOKEN', 'dp.test.fake')
@@ -1075,6 +1115,7 @@ def test_exact_config_reads_doppler_first_by_exact_name(monkeypatch):
         assert get_exact_config('LLM_OPENAI_BASE_URL') is None  # bare Doppler key is not read
 
 
+@requires_real_sdks
 def test_huge_integer_settings_fall_back_instead_of_overflowing(monkeypatch):
     monkeypatch.setenv('LLM_OPENAI_RATE_LIMIT', '9' * 400)
     monkeypatch.setenv('LLM_CLAUDE_RATE_LIMIT', '9' * 400)
@@ -1082,6 +1123,7 @@ def test_huge_integer_settings_fall_back_instead_of_overflowing(monkeypatch):
     assert ClaudeLLM().rate_limit == 50
 
 
+@requires_real_sdks
 def test_zero_openai_rate_limit_means_unlimited(monkeypatch):
     monkeypatch.setenv('LLM_OPENAI_RATE_LIMIT', '0')
     assert OpenAILLM().rate_limit == 0
@@ -1090,6 +1132,7 @@ def test_zero_openai_rate_limit_means_unlimited(monkeypatch):
 @pytest.mark.parametrize('var', [
     'MAX_TOKENS', 'LLM_MAX_TOKENS', 'LLM_MAX_RETRIES', 'LLM_RETRY_DELAY_BASE', 'LLM_TEMPERATURE',
     'LLM_TOP_P', 'LLM_RECONNECT_INTERVAL', 'LLM_DEDUP_CACHE_SIZE', 'LLM_THINKING_TOKEN_MULTIPLIER'])
+@requires_real_sdks
 def test_shared_numeric_settings_cannot_crash_the_cloud_constructors(monkeypatch, caplog, var):
     monkeypatch.setenv(var, 'oops')
     caplog.set_level(logging.WARNING)
@@ -1100,6 +1143,7 @@ def test_shared_numeric_settings_cannot_crash_the_cloud_constructors(monkeypatch
 
 # --- aliases ------------------------------------------------------------------
 
+@requires_real_sdks
 def test_primary_name_is_normalised_before_the_comparison(monkeypatch):
     from hypeman_social.llm.manager import canonical_provider_name
     assert canonical_provider_name('  Anthropic ') == 'claude'
@@ -1140,6 +1184,7 @@ def _http(llm):
 
 
 @pytest.mark.parametrize('which', ['claude', 'openai'])
+@requires_real_sdks
 def test_ambient_proxy_and_ca_variables_are_ignored(monkeypatch, which):
     llm = _real_unmocked(monkeypatch, which, **HOSTILE_ENV)
     assert llm.authenticate() is True, 'an attacker CA path in the environment must not matter'
@@ -1149,6 +1194,7 @@ def test_ambient_proxy_and_ca_variables_are_ignored(monkeypatch, which):
 
 
 @pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
+@requires_real_sdks
 def test_explicit_proxy_setting_is_honoured(monkeypatch, which, prefix):
     llm = _real_unmocked(monkeypatch, which, **{f'LLM_{prefix}_PROXY': 'http://proxy.example:3128'},
                          HTTPS_PROXY='http://envproxy.invalid:3128')
@@ -1161,6 +1207,7 @@ def test_explicit_proxy_setting_is_honoured(monkeypatch, which, prefix):
 
 
 @pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
+@requires_real_sdks
 def test_explicit_ca_bundle_setting_is_honoured(monkeypatch, tmp_path, which, prefix):
     import shutil
     import ssl
@@ -1181,6 +1228,7 @@ def test_explicit_ca_bundle_setting_is_honoured(monkeypatch, tmp_path, which, pr
 
 @pytest.mark.parametrize('which, prefix', [('claude', 'CLAUDE'), ('openai', 'OPENAI')])
 @pytest.mark.parametrize('content', [None, 'not a certificate'])
+@requires_real_sdks
 def test_missing_or_unusable_ca_bundle_makes_the_provider_unavailable(
         monkeypatch, tmp_path, caplog, which, prefix, content):
     path = tmp_path / 'ca.pem'
@@ -1202,6 +1250,7 @@ def test_missing_or_unusable_ca_bundle_makes_the_provider_unavailable(
     'ftp://proxy.example:3128', 'http://user:pw@proxy.example:3128', 'http:///x',
     'proxy.example:3128', 'http://proxy.example:99999', 'http://proxy.example:3128/?a=1',
     'http://proxy.example:3128\n'])
+@requires_real_sdks
 def test_invalid_proxy_setting_makes_the_provider_unavailable(monkeypatch, caplog, which, prefix, proxy):
     llm = _real_unmocked(monkeypatch, which, **{f'LLM_{prefix}_PROXY': proxy})
     caplog.set_level(logging.DEBUG)
@@ -1211,6 +1260,7 @@ def test_invalid_proxy_setting_makes_the_provider_unavailable(monkeypatch, caplo
     assert 'user:pw' not in caplog.text
 
 
+@requires_real_sdks
 def test_a_directory_is_not_a_ca_bundle(monkeypatch, tmp_path):
     llm = _real_unmocked(monkeypatch, 'openai', LLM_OPENAI_CA_BUNDLE=str(tmp_path))
     assert llm.authenticate() is False
@@ -1236,6 +1286,7 @@ class TripwireDict(dict):
         raise AssertionError('iterated a container that exceeds the budget')
 
 
+@requires_real_sdks
 def test_enum_rejects_an_oversized_container_before_iterating_it():
     from hypeman_social.llm._cloud import check_schema_supported
     big_list = TripwireList([0] * 100_000)
@@ -1246,6 +1297,7 @@ def test_enum_rejects_an_oversized_container_before_iterating_it():
         check_schema_supported({'enum': [big_dict]})
 
 
+@requires_real_sdks
 def test_enum_check_allocates_little_for_a_huge_container():
     import tracemalloc
 
@@ -1266,12 +1318,14 @@ def test_enum_check_allocates_little_for_a_huge_container():
     [{'k' * 100_000: 1}],                      # one huge key
     ['y' * 1000] * 200,                        # many strings, huge in aggregate
 ])
+@requires_real_sdks
 def test_enum_strings_and_keys_have_a_byte_budget(enum):
     from hypeman_social.llm._cloud import check_schema_supported
     with pytest.raises(ValueError):
         check_schema_supported({'enum': enum})
 
 
+@requires_real_sdks
 def test_modest_enums_still_pass():
     from hypeman_social.llm._cloud import check_schema_supported
     check_schema_supported({'enum': ['safe', 'unsafe', {'a': [1, 2.5, None, True]}]})

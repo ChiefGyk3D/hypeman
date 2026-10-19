@@ -34,6 +34,10 @@ All notable changes to hypeman-social. The format follows
   retries or gives up on, and run the SDKs with their own retries off.
 - The `claude` and `openai` extras, both included in `all`.
 
+### Compatibility
+
+- The `claude` and `openai` extras install only on Python 3.10 or newer, because the Anthropic 1.x and OpenAI 3.x SDKs require it. On Python 3.9 the providers fail closed (unavailable) like any provider whose extra is missing; everything else in hypeman is unchanged.
+
 ### Security
 - **Claude and OpenAI settings are namespaced-only.** They are read from
   `LLM_CLAUDE_*` / `LLM_OPENAI_*` (and `LLM_MODEL`) by exact name; the bare
