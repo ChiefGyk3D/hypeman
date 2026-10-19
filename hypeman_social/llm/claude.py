@@ -29,7 +29,8 @@ try:
     import anthropic
     CLAUDE_AVAILABLE = True
 except ImportError:
-    anthropic = None
+    # Placeholder for the optional SDK; every use is gated on *_AVAILABLE.
+    anthropic = None  # type: ignore[assignment]  # optional dependency not installed
     CLAUDE_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -64,7 +65,7 @@ class ClaudeLLM(BaseLLM):
         self.timeout = parse_number(
             'LLM_CLAUDE_TIMEOUT', cloud_setting('CLAUDE', 'timeout'), 30.0)
         # 'omit' (an empty value counts as unset) leaves the model's own default in place.
-        self.effort = cloud_setting('CLAUDE', 'effort_level', 'low').strip().lower()
+        self.effort = (cloud_setting('CLAUDE', 'effort_level', 'low') or 'low').strip().lower()
         self.thinking = (cloud_setting('CLAUDE', 'thinking', 'auto') or 'auto').lower()
         self.limiter = RateLimiter(parse_number(
             'LLM_CLAUDE_RATE_LIMIT', cloud_setting('CLAUDE', 'rate_limit'), 50,

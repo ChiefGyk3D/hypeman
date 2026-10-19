@@ -43,7 +43,8 @@ try:
     import openai
     OPENAI_AVAILABLE = True
 except ImportError:
-    openai = None
+    # Placeholder for the optional SDK; every use is gated on *_AVAILABLE.
+    openai = None  # type: ignore[assignment]  # optional dependency not installed
     OPENAI_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -78,8 +79,8 @@ class OpenAILLM(BaseLLM):
                 "no credentials, query or fragment in the URL)")
             self.base_url, self.base_url_rejected = None, True
         # 'omit' leaves the model default; 'none' is a real effort level and is sent.
-        self.reasoning_effort = cloud_setting(
-            'OPENAI', 'reasoning_effort', 'low').strip().lower()
+        self.reasoning_effort = (
+            cloud_setting('OPENAI', 'reasoning_effort', 'low') or 'low').strip().lower()
         self.limiter = RateLimiter(parse_number(
             'LLM_OPENAI_RATE_LIMIT', cloud_setting('OPENAI', 'rate_limit'), 60,
             integer=True, allow_zero=True))
