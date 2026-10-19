@@ -27,11 +27,15 @@ Decisions that matter, and why:
 * The token only ever goes to Discord: the initial gateway URL and every
   ``resume_gateway_url`` must pass ``is_trusted_gateway_url`` before a socket is
   opened, and handshake redirects are off.
-* Inbound frames are size-capped in encoded bytes, per frame (before the
-  payload is read, on the real websocket-client) and per fragmented message.
-* Identify is rate-limited by us as well as by Discord: spacing from
-  ``max_concurrency``, a daily budget that refuses rather than burns the last
-  Identifies, and a backoff that only resets after a connection stayed healthy.
+* Inbound frames are size-capped in encoded bytes, per frame and per fragmented
+  message, before the payload is read. That needs websocket-client internals, so
+  the adapter probes them and fails closed (unavailable) if they do not behave.
+  An event over the cap is a stopped condition, never a replay loop.
+* Identify is rate-limited by us as well as by Discord: a valid GET /gateway/bot
+  answer before every fresh Identify, 5 s spacing, a daily budget that refuses
+  rather than burns the last Identifies, and a backoff that only resets after a
+  connection stayed healthy. Foreign code (the handler) is fenced with
+  ``except BaseException`` and logged by class name only.
 """
 
 import json
@@ -40,9 +44,12 @@ import math
 import random
 import re
 import secrets
+import socket
+import struct
 import sys
 import threading
 import time
+from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
@@ -116,8 +123,10 @@ MAX_BUCKET_WAIT = 3600.0
 
 #: Largest inbound frame, and largest reassembled message, in encoded bytes.
 #: Discord documents no inbound maximum; a GUILD_CREATE for a very large guild is
-#: the biggest legitimate payload. Raising this is the maintainer's call.
+#: the biggest legitimate payload. DISCORD_MAX_EVENT_BYTES raises it, up to the
+#: ceiling (the whole message is held in memory while it is read).
 MAX_MESSAGE_BYTES = 2 * 1024 * 1024
+MAX_EVENT_BYTES_CEILING = 64 * 1024 * 1024
 
 #: Close statuses. Discord invalidates the session on 1000 and 1001 only, so a
 #: reconnect that wants to Resume must close with something else.
@@ -129,7 +138,8 @@ ORDERLY_CLOSE_CODE = 1000
 #: backoff is forgotten. Without it a loop of Identify, READY, session lost
 #: would run at the minimum backoff and burn the daily Identify allowance.
 STABLE_SECONDS = 60.0
-#: One Identify per this many seconds divided by max_concurrency.
+#: Seconds between this client's Identifies. Always 5, whatever max_concurrency
+#: says: an unsharded client is always in bucket 0 (shard_id % max_concurrency).
 IDENTIFY_SPACING_SECONDS = 5.0
 #: Discord's documented allowance per 24 hours (overridden by GET /gateway/bot).
 DAILY_IDENTIFY_LIMIT = 1000
@@ -141,10 +151,10 @@ DAY_SECONDS = 86400.0
 STOP_JOIN_SECONDS = 5.0
 STOP_ABORT_SECONDS = 2.0
 
-OPCODE_CONT = 0
 OPCODE_TEXT = 1
-OPCODE_BINARY = 2
 OPCODE_CLOSE = 8
+#: Striped per-channel send locks: stable identity, bounded memory, no eviction.
+LOCK_STRIPES = 64
 
 _SNOWFLAKE = re.compile(r'[0-9]{1,20}')
 _HOST = re.compile(r'[a-z0-9-]+(\.[a-z0-9-]+)*')
@@ -183,84 +193,154 @@ def is_trusted_gateway_url(url: Any) -> bool:
 
 
 class MessageTooLarge(Exception):
-    """An inbound frame or message exceeded MAX_MESSAGE_BYTES."""
+    """An inbound frame or message exceeded the configured event size."""
 
 
-if websocket is not None:
+def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
+    """(class, None) for a websocket-client WebSocket that refuses oversize frames
+    up front, or (None, reason) when this websocket-client cannot support it.
+
+    The stock reader trusts the length in a frame header and allocates for it
+    (and for every fragment of a message) before any size check can run. The
+    subclass checks the declared length straight after the header is read, so a
+    frame or an aggregate over the limit is refused before its payload is
+    received. This leans on websocket-client internals, so there is no fallback
+    to the stock reader: ``_reader_error`` probes the hook and the adapter
+    reports itself unavailable when it does not work. The same subclass makes the
+    close acknowledgement the library sends by itself follow ``resumable``
+    (Discord keeps a session only if the close status is not 1000 or 1001).
+    """
+    if websocket is None:
+        return None, 'websocket-client is not installed'
+    try:
+        from websocket._abnf import ABNF, frame_buffer
+    except ImportError:
+        return None, 'websocket._abnf.frame_buffer cannot be imported'
+    for attribute in ('recv_length', 'recv_frame'):
+        if not callable(getattr(frame_buffer, attribute, None)):
+            return None, f'frame_buffer.{attribute} is missing'
+
+    class _BoundedFrameBuffer(frame_buffer):
+        def __init__(self, *args: Any, limit: int = MAX_MESSAGE_BYTES, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.limit = limit
+            self._message_bytes = 0
+
+        def recv_length(self) -> None:
+            super().recv_length()
+            header: Any = self.header
+            length: Any = self.length
+            if header is None or not isinstance(length, int) or isinstance(length, bool):
+                raise MessageTooLarge('frame length is unreadable')  # fail closed
+            earlier = self._message_bytes if header[4] == ABNF.OPCODE_CONT else 0
+            if length + earlier > self.limit:
+                raise MessageTooLarge('frame over the size limit')
+
+        def recv_frame(self) -> Any:
+            frame = super().recv_frame()
+            if frame.opcode in (ABNF.OPCODE_TEXT, ABNF.OPCODE_BINARY):
+                self._message_bytes = 0 if frame.fin else len(frame.data)
+            elif frame.opcode == ABNF.OPCODE_CONT:
+                self._message_bytes = 0 if frame.fin else self._message_bytes + len(frame.data)
+            return frame
+
     class _BoundedWebSocket(websocket.WebSocket):
-        """websocket-client that refuses an oversize frame before reading its payload.
-
-        ``frame_limit`` is the budget left for the message being assembled; the
-        session lowers it as fragments arrive. The check hooks the frame buffer
-        right after the length field is parsed, so a hostile length costs a
-        header read, not an allocation. If a future websocket-client renames the
-        hook the guard degrades to the after-the-fact check in the session.
-        """
-
-        frame_limit = MAX_MESSAGE_BYTES
+        #: Set by the session before each read: whether a received close should
+        #: be acknowledged in a way that keeps the session.
+        resumable = False
 
         def __init__(self, *args: Any, **kwargs: Any) -> None:
+            limit = kwargs.pop('max_bytes', MAX_MESSAGE_BYTES)
             super().__init__(*args, **kwargs)
-            buf = getattr(self, 'frame_buffer', None)
-            original = getattr(buf, 'recv_length', None)
-            if buf is None or original is None:
-                return
+            self.frame_buffer = _BoundedFrameBuffer(
+                self._recv, bool(kwargs.get('skip_utf8_validation', False)), limit=limit)
 
-            def recv_length() -> None:
-                original()
-                length = getattr(buf, 'length', None)
-                if isinstance(length, int) and length > max(self.frame_limit, 125):
-                    raise MessageTooLarge('frame length exceeds the receive limit')
+        def send_close(self, status: int = ORDERLY_CLOSE_CODE, reason: Any = b'') -> None:
+            if status == ORDERLY_CLOSE_CODE and self.resumable:
+                status = RESUMABLE_CLOSE_CODE
+            super().send_close(status, reason)
 
-            buf.recv_length = recv_length
+    return _BoundedWebSocket, None
 
 
-class _Assembler:
-    """Joins fragments into one message, counting encoded bytes."""
+_BoundedWebSocket, _BOUNDED_ERROR = _make_bounded_websocket()
+_reader_cache: Optional[Tuple[Optional[str]]] = None
 
-    def __init__(self, limit: int) -> None:
-        self.limit = limit
-        self.parts: List[bytes] = []
-        self.size = 0
-        self.discard = False
 
-    def remaining(self) -> int:
-        return max(0, self.limit - self.size)
+def _probe_reader(cls: Any) -> Optional[str]:
+    """Prove, on in-process socket pairs, that ``cls`` refuses a frame whose header
+    declares more than its limit before the payload arrives (only a few payload
+    bytes are ever sent, so a trusting reader times out), refuses a fragmented
+    message whose total passes the limit, and still reads an ordinary frame.
+    Returns a reason on failure, None on success."""
+    def read(raw: bytes, expect: Optional[type]) -> Optional[str]:
+        reader, writer = socket.socketpair()
+        reader.settimeout(0.5)
+        try:
+            ws = cls(max_bytes=100)
+            ws.sock = reader
+            ws.connected = True
+            writer.sendall(raw)
+            try:
+                got = ws.recv()
+            except Exception as exc:
+                return None if expect and isinstance(exc, expect) else type(exc).__name__
+            return 'accepted' if expect else ('ok' if got == 'hello' else 'misread')
+        finally:
+            reader.close()
+            writer.close()
 
-    def feed(self, opcode: int, data: Any, fin: bool) -> Optional[bytes]:
-        if isinstance(data, str):
-            data = data.encode('utf-8')
-        elif data is None:
-            data = b''
-        if opcode in (OPCODE_TEXT, OPCODE_BINARY):
-            self.parts, self.size = [], 0
-            self.discard = opcode == OPCODE_BINARY
-        elif opcode != OPCODE_CONT:
-            return None
-        if self.discard:
-            if fin:
-                self.discard = False
-            return None
-        if self.size + len(data) > self.limit:
-            raise MessageTooLarge('message exceeds the receive limit')
-        self.parts.append(bytes(data))
-        self.size += len(data)
-        if not fin:
-            return None
-        whole = b''.join(self.parts)
-        self.parts, self.size = [], 0
-        return whole
+    try:
+        huge = struct.pack('!BBQ', 0x81, 127, 1 << 40) + b'x' * 8
+        split = struct.pack('!BB', 0x01, 60) + b'a' * 60 + struct.pack('!BB', 0x80, 60) + b'b' * 8
+        if read(huge, MessageTooLarge) is not None:
+            return 'an oversize frame was not refused before its payload was read'
+        if read(split, MessageTooLarge) is not None:
+            return 'a fragmented message over the limit was not refused'
+        if read(struct.pack('!BB', 0x81, 5) + b'hello', None) != 'ok':
+            return 'an ordinary frame was not read correctly'
+    except Exception:
+        return 'the compatibility probe itself failed'
+    return None
+
+
+def _reader_error() -> Optional[str]:
+    """None when the bounded reader exists and passed its probe, else a reason
+    naming the installed websocket-client. Computed once per process."""
+    global _reader_cache
+    if _reader_cache is None:
+        version = getattr(websocket, '__version__', 'unknown') if websocket else 'not installed'
+        reason = _BOUNDED_ERROR or 'no bounded reader'
+        if _BoundedWebSocket is not None:
+            reason = _probe_reader(_BoundedWebSocket) or ''
+        if reason:
+            reason = (f'Discord chat disabled: websocket-client {version} cannot provide the '
+                      f'size-bounded reader this adapter requires ({reason}). Install a tested '
+                      f'version: pip install "websocket-client>=1.6.0,<2"')
+        _reader_cache = (reason or None,)
+    return _reader_cache[0]
+
+
+@dataclass(frozen=True)
+class _Config:
+    """One immutable reading of the settings, published by a single assignment so
+    no reader ever sees a half-applied reload."""
+
+    token: Optional[str] = field(default=None, repr=False)
+    guild_id: Optional[str] = None
+    channel_ids: FrozenSet[str] = frozenset()
+    mod_role_ids: FrozenSet[str] = frozenset()
+    max_event_bytes: int = MAX_MESSAGE_BYTES
+    error: Optional[str] = None
+    #: Bumped whenever the token changes: a session belongs to one credential.
+    generation: int = 0
 
 
 def _split_ids(raw: str) -> Tuple[FrozenSet[str], bool]:
     """Comma-separated snowflakes to (ids, valid). Blank items are skipped."""
-    found: Set[str] = set()
-    items = [i.strip() for i in raw.split(',')]
-    named = [i for i in items if i]
-    for item in named:
-        if _is_snowflake(item):
-            found.add(item)
-    return frozenset(found), bool(named) and len(found) == len(set(named))
+    named = [i for i in (part.strip() for part in raw.split(',')) if i]
+    found = frozenset(i for i in named if _is_snowflake(i))
+    return found, bool(named) and len(found) == len(set(named))
 
 
 class DiscordChat(ChatReceiver):
@@ -269,12 +349,10 @@ class DiscordChat(ChatReceiver):
     name = 'discord'
 
     def __init__(self) -> None:
-        self._token: Optional[str] = None
-        self._guild_id: Optional[str] = None
-        self._channel_ids: FrozenSet[str] = frozenset()
-        self._mod_role_ids: FrozenSet[str] = frozenset()
-        self._config_error: Optional[str] = None
+        self._cfg = _Config()
+        self._cfg_lock = threading.Lock()
         self._load_config()
+        self._active = self._cfg  # the snapshot the current session was started with
 
         self._handler: Optional[ChatHandler] = None
         self._thread: Optional[threading.Thread] = None
@@ -283,6 +361,7 @@ class DiscordChat(ChatReceiver):
         self._stop_event = threading.Event()
         self._ws: Any = None
         self._fatal: Optional[str] = None
+        self._reader_logged = False
 
         # Session state, owned by the gateway thread.
         self._session_id: Optional[str] = None
@@ -290,20 +369,12 @@ class DiscordChat(ChatReceiver):
         self._seq: Optional[int] = None
         self._bot_id: Optional[str] = None
         self._owners: Dict[str, str] = {}
-        self._resuming = False
         self._interval = 0.0
         self._next_beat = 0.0
         self._acked = True
         self._backoff = 1.0
         self._ready_at: Optional[float] = None
-        self._gateway_url = GATEWAY_URL
-
-        # Identify accounting.
         self._identify_times: List[float] = []
-        self._start_total = DAILY_IDENTIFY_LIMIT
-        self._start_remaining: Optional[int] = None
-        self._start_reset_at: Optional[float] = None
-        self._concurrency = 1
 
         # Seams for tests.
         self._clock = time.monotonic
@@ -311,65 +382,82 @@ class DiscordChat(ChatReceiver):
         self._jitter = random.random
         self._http: Any = None
 
-        # Send coordination. _rate_lock guards only the dicts below; a request
-        # holds its channel's lock, never _rate_lock, across the network call.
+        # Send coordination. _rate_lock guards only the deadlines below; a request
+        # holds its channel's stripe lock, never _rate_lock, across the network call.
         self._rate_lock = threading.Lock()
         self._rate_until: Dict[str, float] = {}
         self._global_until = 0.0
-        self._channel_locks: Dict[str, threading.Lock] = {}
+        self._channel_locks = tuple(threading.Lock() for _ in range(LOCK_STRIPES))
 
     # -- configuration -----------------------------------------------------
 
-    def _load_config(self) -> None:
-        """Read config; called again from is_available() so recovery can heal.
+    def _load_config(self) -> _Config:
+        """Read every setting into one snapshot and publish it with one assignment.
 
-        An absent filter means unrestricted, by design. A filter that is
+        An absent filter means unrestricted, by design. A setting that is
         supplied but invalid fails closed: the adapter is unavailable and the
-        error names the setting, never the value.
+        error names the setting, never the value. Called again from
+        is_available() so recovery can heal.
         """
-        self._token = platform_secret('Discord', 'bot_token') or None
-        bad: List[str] = []
+        with self._cfg_lock:
+            token = platform_secret('Discord', 'bot_token') or None
+            bad: List[str] = []
 
-        guild = (platform_secret('Discord', 'guild_id') or '').strip()
-        self._guild_id = None
-        if guild:
-            if _is_snowflake(guild):
-                self._guild_id = guild
-            else:
+            guild: Optional[str] = (platform_secret('Discord', 'guild_id') or '').strip() or None
+            if guild is not None and not _is_snowflake(guild):
+                guild = None
                 bad.append('DISCORD_GUILD_ID')
 
-        channels = (platform_secret('Discord', 'channel_ids') or '').strip()
-        self._channel_ids = frozenset()
-        if channels:
-            ids, valid = _split_ids(channels)
-            if valid:
-                self._channel_ids = ids
-            else:
-                bad.append('DISCORD_CHANNEL_IDS')
+            channels: FrozenSet[str] = frozenset()
+            raw_channels = (platform_secret('Discord', 'channel_ids') or '').strip()
+            if raw_channels:
+                channels, valid = _split_ids(raw_channels)
+                if not valid:
+                    channels = frozenset()
+                    bad.append('DISCORD_CHANNEL_IDS')
 
-        roles, _ = _split_ids(platform_secret('Discord', 'moderator_role_ids') or '')
-        self._mod_role_ids = roles  # an invalid id only removes a privilege
-        self._config_error = (
-            f'{" and ".join(bad)} is set but is not a valid id list' if bad else None)
+            limit = MAX_MESSAGE_BYTES
+            raw_limit = (platform_secret('Discord', 'max_event_bytes') or '').strip()
+            if raw_limit:
+                if re.fullmatch(r'[0-9]{1,10}', raw_limit) and \
+                        0 < int(raw_limit) <= MAX_EVENT_BYTES_CEILING:
+                    limit = int(raw_limit)
+                else:
+                    bad.append('DISCORD_MAX_EVENT_BYTES')
+
+            roles, _ = _split_ids(platform_secret('Discord', 'moderator_role_ids') or '')
+            # An invalid role id only removes a privilege, so it is dropped.
+            self._cfg = _Config(
+                token=token, guild_id=guild, channel_ids=channels, mod_role_ids=roles,
+                max_event_bytes=limit,
+                error=f'{" and ".join(bad)} is set but is not valid' if bad else None,
+                generation=self._cfg.generation + (self._cfg.token != token))
+            return self._cfg
 
     @staticmethod
     def _describe(exc: BaseException) -> str:
-        """Log an exception by type only: transport error text can carry a token
-        (current or previous) and is not needed to act on."""
+        """Log an exception by class name only: its text, args and chained context
+        can carry a token (current or previous) and are not needed to act on."""
         return type(exc).__name__
 
     # -- ChatReceiver ------------------------------------------------------
 
     def is_available(self) -> bool:
-        self._load_config()
+        cfg = self._load_config()
         if websocket is None:
             logger.warning('Discord chat needs websocket-client: pip install "hypeman-social[discord-chat]"')
             return False
-        if not self._token:
+        error = _reader_error()
+        if error is not None:
+            if not self._reader_logged:
+                self._reader_logged = True
+                logger.error('%s', error)
+            return False
+        if not cfg.token:
             logger.warning('Discord chat: no bot credential configured')
             return False
-        if self._config_error:
-            logger.error('Discord chat: %s', self._config_error)
+        if cfg.error:
+            logger.error('Discord chat: %s', cfg.error)
             return False
         if self._fatal:
             logger.warning('Discord chat is stopped: %s', self._fatal)
@@ -390,7 +478,7 @@ class DiscordChat(ChatReceiver):
                 return
             self._handler = handler
             self._stop_event = threading.Event()
-            self._thread = threading.Thread(target=self._run, name='discord-chat', daemon=True)
+            self._thread = threading.Thread(target=self._serve, name='discord-chat', daemon=True)
             self._thread.start()
 
     def stop(self) -> None:
@@ -434,11 +522,14 @@ class DiscordChat(ChatReceiver):
     # -- gateway loop ------------------------------------------------------
 
     def _connect(self, url: str) -> Any:
+        # Never fall back to the stock reader: it checks sizes after allocating.
+        if _reader_error() is not None:
+            raise OSError('the size-bounded websocket reader is unavailable')
         # redirect_limit=0: a handshake redirect would carry the next frame
         # (Identify or Resume, with the token) to a host nobody checked.
         ws = websocket.create_connection(
-            url, timeout=POLL_SECONDS, redirect_limit=0,
-            class_=_BoundedWebSocket, fire_cont_frame=True)
+            url, timeout=POLL_SECONDS, redirect_limit=0, class_=_BoundedWebSocket,
+            max_bytes=self._active.max_event_bytes)
         # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
         # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
         if ws.getstatus() != 101:
@@ -450,9 +541,17 @@ class DiscordChat(ChatReceiver):
         """Sleep between connection attempts; True if asked to stop meanwhile."""
         return self._stop_event.wait(seconds)
 
+    def _serve(self) -> None:
+        """Thread body. Nothing may escape: the default thread excepthook prints
+        an exception with its chained context, which can carry a token."""
+        try:
+            self._run()
+        except BaseException as exc:
+            self._fatal = f'the receive thread failed ({self._describe(exc)}); call start() to restart'
+            logger.error('Discord chat worker failed: %s', self._describe(exc))
+
     def _run(self) -> None:
         stop = self._stop_event
-        self._refresh_start_limit()
         while not stop.is_set():
             self._ready_at = None
             try:
@@ -474,11 +573,16 @@ class DiscordChat(ChatReceiver):
         self._send_frame(ws, {'op': OP_HEARTBEAT, 'd': self._seq})
         self._acked = False
 
-    def _refresh_start_limit(self) -> None:
-        """GET /gateway/bot: session_start_limit, max_concurrency and the URL."""
-        token = self._token
-        if not token:
-            return
+    def _start_limit(self, token: str) -> Optional[Tuple[str, int, int]]:
+        """GET /gateway/bot: (gateway url, total, remaining), or None unless Discord
+        gave a complete, valid answer. Asked before every fresh Identify, so the
+        budget is never guessed and no state about it is kept."""
+        def number(value: Any, low: int) -> int:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) \
+                    or not math.isfinite(value) or value < low:
+                raise ValueError('bad session_start_limit field')
+            return int(value)
+
         try:
             resp = self._session_http().get(
                 f'{API_BASE}/gateway/bot',
@@ -486,81 +590,80 @@ class DiscordChat(ChatReceiver):
                 timeout=REQUEST_TIMEOUT, allow_redirects=False)
             if resp.status_code != 200:
                 logger.warning('Discord start-limit lookup returned HTTP %s', resp.status_code)
-                return
+                return None
             data = resp.json()
-            limit = data.get('session_start_limit') or {}
+            limit = data['session_start_limit']
+            total = number(limit['total'], 1)
+            remaining = number(limit['remaining'], 0)
+            number(limit['reset_after'], 0)
+            number(limit['max_concurrency'], 1)
             url = data.get('url')
             if isinstance(url, str) and is_trusted_gateway_url(url):
-                self._gateway_url = url + ('&' if '?' in url else '?') + _GATEWAY_QUERY
-            total = limit.get('total')
-            remaining = limit.get('remaining')
-            reset_after = limit.get('reset_after')
-            concurrency = limit.get('max_concurrency')
-            if isinstance(total, int) and not isinstance(total, bool) and total > 0:
-                self._start_total = total
-            if isinstance(remaining, int) and not isinstance(remaining, bool):
-                self._start_remaining = max(0, remaining)
-                if isinstance(reset_after, (int, float)) and math.isfinite(reset_after):
-                    self._start_reset_at = self._clock() + max(0.0, float(reset_after)) / 1000.0
-            if isinstance(concurrency, int) and not isinstance(concurrency, bool):
-                self._concurrency = max(1, concurrency)
+                url += ('&' if '?' in url else '?') + _GATEWAY_QUERY
+            else:
+                url = GATEWAY_URL
+            return url, total, remaining
         except Exception as exc:
             logger.warning('Discord start-limit lookup failed: %s', self._describe(exc))
+            return None
 
-    def _identify_refusal(self) -> Optional[str]:
-        """Why a fresh Identify must not be sent now, or None when it may be."""
+    def _identify_gate(self, token: str) -> Optional[str]:
+        """The gateway URL to Identify at, or None when a fresh Identify must not
+        be sent now: Discord's budget is unknown (the run loop retries with its
+        backoff), nearly spent (a stopped condition), or we were asked to stop."""
+        info = self._start_limit(token)
+        if info is None:
+            return None
+        url, total, remaining = info
         now = self._clock()
         self._identify_times = [t for t in self._identify_times if now - t < DAY_SECONDS]
-        if self._start_reset_at is not None and now >= self._start_reset_at:
-            self._start_remaining = None  # the window rolled over; the old count is stale
-            self._start_reset_at = None
-        if len(self._identify_times) >= self._start_total - IDENTIFY_RESERVE:
-            return ('refusing to Identify: this process has used its daily Identify '
-                    'allowance (a reserve is kept so the token is not reset)')
-        if self._start_remaining is not None and self._start_remaining <= IDENTIFY_RESERVE:
-            return ('refusing to Identify: Discord reports the session start limit '
-                    'is nearly exhausted')
-        return None
+        if len(self._identify_times) >= total - IDENTIFY_RESERVE or remaining <= IDENTIFY_RESERVE:
+            self._fatal = ('refusing to Identify: the daily session start allowance is nearly '
+                           'used (a reserve is kept so the token is not reset)')
+            logger.error('Discord chat: %s', self._fatal)
+            return None
+        if self._identify_times:
+            delay = self._identify_times[-1] + IDENTIFY_SPACING_SECONDS - now
+            if delay > 0 and self._wait(delay):
+                return None
+        return url
 
-    def _identify_delay(self) -> float:
-        if not self._identify_times:
-            return 0.0
-        gap = IDENTIFY_SPACING_SECONDS / max(1, self._concurrency)
-        return max(0.0, self._identify_times[-1] + gap - self._clock())
+    def _too_large(self, cfg: _Config) -> None:
+        """An event over the cap is never replayed or retried: stop, say how to fix."""
+        self._fatal = (f'an incoming event was larger than {cfg.max_event_bytes} bytes; raise '
+                       f'DISCORD_MAX_EVENT_BYTES (at most {MAX_EVENT_BYTES_CEILING}) to hear it')
+        logger.error('Discord chat: %s', self._fatal)
 
     def _session(self) -> None:
         """One connection, from connect to disconnect. Returns when it ends."""
         stop = self._stop_event
-        url = self._gateway_url
-        self._resuming = False
-        if self._session_id and self._resume_url and self._seq is not None:
-            if is_trusted_gateway_url(self._resume_url):
-                self._resuming = True
-                base = self._resume_url
-                url = base + ('&' if '?' in base else '?') + _GATEWAY_QUERY
-            else:
-                logger.error('Discord gateway: ignoring an untrusted resume URL')
-        if not self._resuming:
+        cfg = self._cfg
+        token = cfg.token
+        if not token:
+            return
+        url = GATEWAY_URL
+        # A reloaded, different credential never resumes the previous one's session.
+        resuming = (self._session_id is not None and self._seq is not None
+                    and self._active.generation == cfg.generation)
+        if resuming and not is_trusted_gateway_url(self._resume_url):
+            logger.error('Discord gateway: ignoring an untrusted resume URL')
+            resuming = False
+        if resuming:
+            base = self._resume_url or ''
+            url = base + ('&' if '?' in base else '?') + _GATEWAY_QUERY
+        else:
             self._reset_session()
-            if not is_trusted_gateway_url(url):
-                self._fatal = 'refusing to connect: the gateway URL is not a Discord gateway'
-                logger.error('Discord chat: %s', self._fatal)
+            gate = self._identify_gate(token)
+            if gate is None:
                 return
-            reason = self._identify_refusal()
-            if reason:
-                self._fatal = reason
-                logger.error('Discord chat: %s', reason)
-                return
-            delay = self._identify_delay()
-            if delay > 0 and self._wait(delay):
-                return
+            url = gate
+        self._active = cfg
         if stop.is_set():
             return
         ws = self._connect(url)
         self._ws = ws
         self._acked = True
         self._next_beat = float('inf')
-        assembler = _Assembler(MAX_MESSAGE_BYTES)
         status: Optional[int] = None
         try:
             while not stop.is_set():
@@ -572,11 +675,11 @@ class DiscordChat(ChatReceiver):
                         return
                     self._heartbeat(ws)
                     self._next_beat = self._clock() + self._interval
-                ws.frame_limit = assembler.remaining()
+                ws.resumable = bool(self._session_id) and not stop.is_set()
                 try:
                     opcode, frame = ws.recv_data_frame(True)
                 except MessageTooLarge:
-                    logger.error('Discord gateway: oversize frame, reconnecting')
+                    self._too_large(cfg)
                     status = OVERSIZE_CLOSE_CODE
                     return
                 except Exception as exc:
@@ -589,16 +692,16 @@ class DiscordChat(ChatReceiver):
                 if opcode == OPCODE_CLOSE:
                     self._on_close(frame)
                     return
-                if opcode not in (OPCODE_TEXT, OPCODE_CONT, OPCODE_BINARY):
+                if opcode != OPCODE_TEXT:
                     continue
-                try:
-                    whole = assembler.feed(opcode, getattr(frame, 'data', frame),
-                                           bool(getattr(frame, 'fin', True)))
-                except MessageTooLarge:
-                    logger.error('Discord gateway: oversize message, reconnecting')
+                data = getattr(frame, 'data', frame)
+                if isinstance(data, str):
+                    data = data.encode('utf-8')
+                if len(data) > cfg.max_event_bytes:  # the reader's own check, belt and braces
+                    self._too_large(cfg)
                     status = OVERSIZE_CLOSE_CODE
                     return
-                if whole is not None and not self._on_message(ws, whole):
+                if not self._on_message(ws, data):
                     return
         finally:
             self._ws = None
@@ -667,17 +770,17 @@ class DiscordChat(ChatReceiver):
         return True
 
     def _identify_or_resume(self, ws: Any) -> bool:
-        """Send Resume or Identify; False when cancelled (nothing is sent then)."""
+        """Send Resume or Identify; False when cancelled (nothing is sent then).
+
+        At HELLO a session id exists only if _session decided to resume."""
         if self._stop_event.is_set():
             return False
-        token = self._token
-        if self._resuming and self._session_id and self._seq is not None:
+        token = self._active.token
+        if self._session_id and self._seq is not None:
             self._send_frame(ws, {'op': OP_RESUME, 'd': {
                 'token': token, 'session_id': self._session_id, 'seq': self._seq}})
             return True
         self._identify_times.append(self._clock())
-        if self._start_remaining is not None:
-            self._start_remaining = max(0, self._start_remaining - 1)
         self._send_frame(ws, {'op': OP_IDENTIFY, 'd': {
             'token': token,
             'intents': INTENTS,
@@ -718,26 +821,30 @@ class DiscordChat(ChatReceiver):
                 self._owners.pop(str(body['id']), None)
         elif kind == 'MESSAGE_CREATE':
             event = self.to_event(body)
-            if event is not None and self._handler is not None:
+            handler = self._handler
+            if event is not None and handler is not None:
                 try:
-                    self._handler(event)
-                except Exception as exc:
-                    logger.warning('Discord chat handler raised: %s', self._describe(exc))
+                    handler(event)
+                except BaseException as exc:
+                    # Foreign code. Class name only, and nothing escapes to kill the
+                    # worker or reach the thread excepthook with chained context.
+                    logger.warning('Discord chat handler failed: %s', self._describe(exc))
 
     # -- conversion --------------------------------------------------------
 
     def to_event(self, msg: Dict[str, Any]) -> Optional[ChatEvent]:
         """Convert a MESSAGE_CREATE body, or None when it is not ours to hear."""
-        if self._config_error:
-            return None  # a supplied filter we could not read: hear nothing
+        cfg = self._cfg  # one snapshot for the whole decision
+        if cfg.error:
+            return None  # a supplied setting we could not read: hear nothing
         guild_id = msg.get('guild_id')
         if guild_id is None:
             return None  # a direct message: never read
         guild_id = str(guild_id)
         channel_id = str(msg.get('channel_id', ''))
-        if self._guild_id and guild_id != self._guild_id:
+        if cfg.guild_id and guild_id != cfg.guild_id:
             return None
-        if self._channel_ids and channel_id not in self._channel_ids:
+        if cfg.channel_ids and channel_id not in cfg.channel_ids:
             return None
         if msg.get('type', 0) not in HEARTABLE_TYPES:
             return None
@@ -759,7 +866,7 @@ class DiscordChat(ChatReceiver):
         if not bridged:
             if self._owners.get(guild_id) == author_id:
                 roles.add(ROLE_BROADCASTER)
-            if self._mod_role_ids & {str(r) for r in (member.get('roles') or [])}:
+            if cfg.mod_role_ids & {str(r) for r in (member.get('roles') or [])}:
                 roles.add(ROLE_MODERATOR)
 
         ref = msg.get('message_reference') or {}
@@ -798,28 +905,28 @@ class DiscordChat(ChatReceiver):
         """Post ``text`` to a channel id. Truncated to 2000 characters. Never raises."""
         try:
             return self._send(channel, text, reply_to_id)
-        except Exception as exc:
+        except BaseException as exc:  # the documented contract: never raises
             logger.warning('Discord send failed: %s', self._describe(exc))
             return False
 
-    def _channel_lock(self, channel: str) -> threading.Lock:
-        with self._rate_lock:
-            lock = self._channel_locks.get(channel)
-            if lock is None:
-                if len(self._channel_locks) > 256:
-                    self._channel_locks = {k: v for k, v in self._channel_locks.items()
-                                           if v.locked()}
-                lock = self._channel_locks[channel] = threading.Lock()
-            return lock
+    def _admit(self, channel: str, started: float) -> bool:
+        """Wait until the global and this channel's deadlines have both passed.
 
-    def _admission_pause(self, channel: str) -> float:
-        """Seconds until both the global and this channel's deadlines have passed."""
-        with self._rate_lock:
-            until = max(self._global_until, self._rate_until.get(channel, 0.0))
-        return until - self._clock()
+        The deadlines are re-read after every wait, because another caller may
+        have extended them meanwhile. False when waiting would pass the cap,
+        measured on the monotonic clock from ``started``."""
+        while True:
+            with self._rate_lock:
+                pause = max(self._global_until, self._rate_until.get(channel, 0.0)) - self._clock()
+            if pause <= 0:
+                return True
+            if self._clock() - started + pause > MAX_RATE_WAIT:
+                return False
+            self._sleep(pause)
 
     def _send(self, channel: str, text: str, reply_to_id: Optional[str]) -> bool:
-        if not self._token or not _is_snowflake(str(channel)) or not text:
+        token = self._cfg.token
+        if not token or not _is_snowflake(str(channel)) or not text:
             return False
         if len(text) > MESSAGE_LIMIT:
             text = text[:MESSAGE_LIMIT - 1] + '…'
@@ -838,22 +945,20 @@ class DiscordChat(ChatReceiver):
             body['message_reference'] = {
                 'message_id': str(reply_to_id), 'fail_if_not_exists': False}
         url = f'{API_BASE}/channels/{channel}/messages'
-        headers = {'Authorization': f'Bot {self._token}', 'User-Agent': USER_AGENT}
+        headers = {'Authorization': f'Bot {token}', 'User-Agent': USER_AGENT}
         # One request per channel at a time: the bucket state a response reports
-        # is recorded before the next caller on that channel is admitted.
-        with self._channel_lock(channel):
+        # is recorded before the next caller on that channel is admitted. A fixed
+        # stripe, chosen by the id, so the lock for a channel never changes
+        # identity (two channels may share a stripe and take turns; that is safe).
+        with self._channel_locks[int(channel) % LOCK_STRIPES]:
             return self._post(channel, url, body, headers)
 
     def _post(self, channel: str, url: str, body: Dict[str, Any], headers: Dict[str, str]) -> bool:
-        waited = 0.0
+        started = self._clock()
         for attempt in range(MAX_SEND_ATTEMPTS):
-            pause = self._admission_pause(channel)
-            if pause > 0:
-                if waited + pause > MAX_RATE_WAIT:
-                    logger.warning('Discord send: rate limited for longer than the cap')
-                    return False
-                self._sleep(pause)
-                waited += pause
+            if not self._admit(channel, started):
+                logger.warning('Discord send: rate limited for longer than the cap')
+                return False
             resp = self._session_http().post(
                 url, json=body, headers=headers, timeout=REQUEST_TIMEOUT,
                 allow_redirects=False)
@@ -867,14 +972,12 @@ class DiscordChat(ChatReceiver):
                     logger.warning('Discord send: rate limit with an unusable retry delay')
                     return False
                 self._note_429(channel, resp, delay)
-                if waited + delay > MAX_RATE_WAIT or attempt == MAX_SEND_ATTEMPTS - 1:
+                if self._clock() - started + delay > MAX_RATE_WAIT or attempt == MAX_SEND_ATTEMPTS - 1:
                     logger.warning('Discord send: rate limited, giving up')
                     return False
                 continue  # the next admission waits out the recorded deadline
             if status >= 500 and attempt < MAX_SEND_ATTEMPTS - 1:
-                backoff = min(2.0 ** attempt, 4.0)
-                self._sleep(backoff)
-                waited += backoff
+                self._sleep(min(2.0 ** attempt, 4.0))
                 continue
             logger.warning('Discord send rejected with HTTP %s', status)
             return False

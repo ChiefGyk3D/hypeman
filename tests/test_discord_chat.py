@@ -62,7 +62,8 @@ class Resp:
 
 
 class FakeHTTP:
-    """Plays queued POST responses; GET (the start-limit lookup) is a 500 unless queued."""
+    """Plays queued POST responses; GET (the start-limit lookup) is a healthy
+    answer unless queued."""
 
     def __init__(self, responses=(), gets=()):
         self.responses = list(responses)
@@ -77,14 +78,14 @@ class FakeHTTP:
         with self.lock:
             self.calls.append((url, kw))
             item = self.responses.pop(0)
-        if isinstance(item, Exception):
+        if isinstance(item, BaseException):
             raise item
         return item
 
     def get(self, url, **kw):
         with self.lock:
             self.gets.append((url, kw))
-            item = self.get_responses.pop(0) if self.get_responses else Resp(500)
+            item = self.get_responses.pop(0) if self.get_responses else start_limit()
         if isinstance(item, Exception):
             raise item
         return item
@@ -647,7 +648,7 @@ def test_fixing_the_filter_heals(chat, monkeypatch):
 def test_snowflakes_are_ascii_digits_only(chat, monkeypatch):
     monkeypatch.setenv('DISCORD_MODERATOR_ROLE_IDS', f'{MOD_ROLE}, \u0661\u0662\u0663')
     chat._load_config()
-    assert chat._mod_role_ids == frozenset({MOD_ROLE})
+    assert chat._cfg.mod_role_ids == frozenset({MOD_ROLE})
     chat._http = FakeHTTP([Resp(200)])
     assert chat.send('\u0661\u0662\u0663', 'hi') is False
     assert chat._http.calls == []
@@ -656,6 +657,20 @@ def test_snowflakes_are_ascii_digits_only(chat, monkeypatch):
 
 
 # -- sending --------------------------------------------------------------
+
+def ticking(chat, now=100.0):
+    """A virtual clock that only the (fake) sleep advances, so waits really elapse."""
+    clock = {'now': now}
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        clock['now'] += seconds
+
+    chat._clock = lambda: clock['now']
+    chat._sleep = sleep
+    return slept, clock
+
 
 def test_send_posts_with_safe_mentions_and_reply(chat):
     chat._http = FakeHTTP([Resp(200)])
@@ -681,48 +696,42 @@ def test_send_rejects_bad_input(chat):
     assert chat._http.calls == []
 
 
-def test_send_without_token_is_false(chat):
-    chat._token = None
+def test_send_without_token_is_false(chat, monkeypatch):
+    monkeypatch.delenv('DISCORD_BOT_TOKEN')
+    chat._load_config()
     assert chat.send(CHAN, 'hi') is False
 
 
 def test_429_waits_retry_after_then_succeeds(chat):
-    chat._clock = lambda: 100.0
-    slept = []
-    chat._sleep = slept.append
+    slept, _ = ticking(chat)
     chat._http = FakeHTTP([Resp(429, {'retry_after': 1.5, 'global': False}), Resp(200)])
     assert chat.send(CHAN, 'hi') is True
     assert slept == [1.5]
 
 
 def test_429_header_fallback(chat):
-    chat._clock = lambda: 100.0
-    slept = []
-    chat._sleep = slept.append
+    slept, _ = ticking(chat)
     chat._http = FakeHTTP([Resp(429, None, {'Retry-After': '2'}), Resp(200)])
     assert chat.send(CHAN, 'hi') is True
     assert slept == [2.0]
 
 
 def test_429_over_cap_gives_up_without_sleeping(chat):
-    slept = []
-    chat._sleep = slept.append
+    slept, _ = ticking(chat)
     chat._http = FakeHTTP([Resp(429, {'retry_after': 9999})])
     assert chat.send(CHAN, 'hi') is False
     assert slept == []
 
 
 def test_429_forever_is_bounded(chat):
-    chat._sleep = lambda s: None
+    ticking(chat)
     chat._http = FakeHTTP([Resp(429, {'retry_after': 1})] * 10)
     assert chat.send(CHAN, 'hi') is False
     assert len(chat._http.calls) <= dc.MAX_SEND_ATTEMPTS
 
 
 def test_exhausted_bucket_delays_next_send(chat):
-    slept = []
-    chat._clock = lambda: 100.0
-    chat._sleep = slept.append
+    slept, _ = ticking(chat)
     chat._http = FakeHTTP([
         Resp(200, None, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset-After': '2.0'}),
         Resp(200)])
@@ -857,20 +866,20 @@ def test_ready_with_untrusted_resume_url_is_not_remembered(chat):
     assert chat._resume_url is None
 
 
-def test_untrusted_initial_gateway_url_is_never_connected(chat):
-    chat._gateway_url = 'ws://attacker.invalid/?v=10&encoding=json'
+def test_an_untrusted_lookup_url_is_never_connected(chat):
+    chat._http = FakeHTTP(gets=[start_limit(url='wss://evil.invalid/')])
     urls = []
     chat._connect = lambda url: urls.append(url) or FakeWS([])
     chat._stop_event.clear()
     chat._session()
-    assert urls == []
-    assert chat._fatal
+    assert urls == [dc.GATEWAY_URL]
 
 
 def test_start_limit_lookup_ignores_an_untrusted_url(chat):
     chat._http = FakeHTTP(gets=[start_limit(url='wss://evil.invalid/')])
-    chat._refresh_start_limit()
-    assert chat._gateway_url == dc.GATEWAY_URL
+    assert chat._start_limit(FAKE_TOKEN)[0] == dc.GATEWAY_URL
+    chat._http = FakeHTTP(gets=[start_limit(url='wss://gateway-us-east1-b.discord.gg/')])
+    assert chat._start_limit(FAKE_TOKEN)[0].startswith('wss://gateway-us-east1-b.discord.gg/?v=10')
 
 
 def test_connect_disables_handshake_redirects(chat, monkeypatch):
@@ -931,10 +940,10 @@ def frame_header(length, opcode=1, fin=True):
     return bytes([first, 127]) + struct.pack('!Q', length)
 
 
-def real_ws(timeout=1.0):
+def real_ws(timeout=1.0, **options):
     """A real websocket-client object reading from a socketpair we control."""
     near, far = socket.socketpair()
-    ws = dc._BoundedWebSocket(fire_cont_frame=True)
+    ws = dc._BoundedWebSocket(**options)
     ws.sock = near
     ws.connected = True
     ws.settimeout(timeout)
@@ -954,6 +963,7 @@ def test_oversize_frame_is_refused_without_parsing(chat, monkeypatch):
     ws = run_session(chat, [(1, Frame(payload))])
     assert ws.closed_with and ws.closed_with[0] == dc.OVERSIZE_CLOSE_CODE
     assert got == []
+    assert chat._fatal and 'DISCORD_MAX_EVENT_BYTES' in chat._fatal
 
 
 def test_size_is_counted_in_encoded_bytes_not_characters(chat, monkeypatch):
@@ -965,30 +975,9 @@ def test_size_is_counted_in_encoded_bytes_not_characters(chat, monkeypatch):
     assert ws.closed_with[0] == dc.OVERSIZE_CLOSE_CODE
 
 
-def test_fragmented_message_is_capped_cumulatively(chat, monkeypatch):
-    piece = b'x' * (dc.MAX_MESSAGE_BYTES // 3 + 1)
-    frames = [(1, Frame(piece, fin=False)), (0, Frame(piece, fin=False)),
-              (0, Frame(piece, fin=False)), (0, Frame(piece, fin=True))]
-    monkeypatch.setattr(dc.json, 'loads', lambda *a, **k: pytest.fail('oversize frame parsed'))
-    ws = run_session(chat, frames)
-    assert ws.closed_with[0] == dc.OVERSIZE_CLOSE_CODE
-
-
-def test_fragmented_message_within_limit_is_reassembled(chat):
-    whole = json.dumps({'op': 0, 'd': msg(), 's': 4, 't': 'MESSAGE_CREATE'}).encode()
-    got = []
-    chat._handler = got.append
-    run_session(chat, [
-        text(10, HELLO),
-        (1, Frame(whole[:20], fin=False)), (0, Frame(whole[20:40], fin=False)),
-        (0, Frame(whole[40:], fin=True)),
-    ])
-    assert [e.text for e in got] == ['hello']
-
-
-def test_binary_message_is_ignored(chat):
-    ws = run_session(chat, [(2, Frame(b'\x00\x01', fin=False)), (0, Frame(b'{"op":7}', fin=True))])
-    assert ws.frames == [] and chat._session_id is None
+def test_non_text_frames_are_ignored(chat):
+    ws = run_session(chat, [(2, Frame(b'\x00\x01')), (9, Frame(b''))])
+    assert ws.frames == [] and not chat._fatal
 
 
 def test_deeply_nested_json_is_dropped_not_fatal(chat):
@@ -1012,16 +1001,23 @@ def test_real_frame_header_over_the_limit_is_refused_before_the_payload_is_read(
         far.close()
 
 
-def test_real_fragmented_frames_arrive_one_by_one_and_are_budgeted():
-    ws, far = real_ws()
+def test_real_fragments_are_reassembled_within_the_limit():
+    ws, far = real_ws(max_bytes=100)
     try:
         far.sendall(frame_header(3, 1, fin=False) + b'abc' + frame_header(2, 0, fin=True) + b'de')
-        first = ws.recv_data_frame(True)
-        second = ws.recv_data_frame(True)
-        assert (first[0], first[1].data, second[0], second[1].data) == (1, b'abc', 0, b'de')
-        # With most of the budget spent, a frame that would overshoot is refused early.
-        ws.frame_limit = 1000
-        far.sendall(frame_header(1001) + b'y' * 1001)
+        opcode, frame = ws.recv_data_frame(True)
+        assert (opcode, frame.data) == (1, b'abcde')
+    finally:
+        ws.sock.close()
+        far.close()
+
+
+def test_real_fragmented_message_over_the_cumulative_limit_is_refused_early():
+    ws, far = real_ws(max_bytes=100)
+    try:
+        # Each fragment alone is fine; together they pass 100. Only the second
+        # header is sent: a reader that waited for its payload would time out.
+        far.sendall(frame_header(60, 1, fin=False) + b'a' * 60 + frame_header(60, 0, fin=True))
         with pytest.raises(dc.MessageTooLarge):
             ws.recv_data_frame(True)
     finally:
@@ -1029,12 +1025,15 @@ def test_real_fragmented_frames_arrive_one_by_one_and_are_budgeted():
         far.close()
 
 
-def test_connect_uses_the_bounded_websocket(chat, monkeypatch):
+def test_connect_uses_the_bounded_websocket_with_the_configured_limit(chat, monkeypatch):
+    monkeypatch.setenv('DISCORD_MAX_EVENT_BYTES', '12345')
+    chat._load_config()
+    chat._active = chat._cfg
     seen = {}
     monkeypatch.setattr(dc.websocket, 'create_connection',
                         lambda url, **kw: seen.update(kw) or FakeWS([]))
     chat._connect(dc.GATEWAY_URL)
-    assert seen['class_'] is dc._BoundedWebSocket and seen['fire_cont_frame'] is True
+    assert seen['class_'] is dc._BoundedWebSocket and seen['max_bytes'] == 12345
 
 
 # -- stop(), start() and cancellation -------------------------------------
@@ -1230,12 +1229,12 @@ def test_identifies_are_spaced_by_the_concurrency_limit(chat):
     assert gaps and min(gaps) >= dc.IDENTIFY_SPACING_SECONDS
 
 
-def test_spacing_scales_with_max_concurrency(chat):
-    chat._http = FakeHTTP(gets=[start_limit(concurrency=5)])
+def test_spacing_is_five_seconds_whatever_max_concurrency_says(chat):
+    """An unsharded client always lands in bucket 0, so max_concurrency is no licence."""
+    chat._http = FakeHTTP(gets=[start_limit(concurrency=16)] * 50)
     idents = cycling_run(chat, limit=60.0)
     gaps = [b - a for a, b in zip(idents, idents[1:])]
-    assert gaps and min(gaps) >= dc.IDENTIFY_SPACING_SECONDS / 5
-    assert min(gaps) < dc.IDENTIFY_SPACING_SECONDS
+    assert len(gaps) >= 3 and min(gaps) >= dc.IDENTIFY_SPACING_SECONDS
 
 
 def test_start_limit_is_fetched_with_the_bot_token(chat):
@@ -1258,31 +1257,70 @@ def test_low_remaining_budget_refuses_to_identify_and_reports_once(chat, caplog)
     assert len(errors) == 1
 
 
-def test_in_process_budget_counts_identifies_when_the_api_is_unreachable(chat):
+def test_local_count_is_an_extra_constraint(chat):
     clock = {'now': 100000.0}
     chat._clock = lambda: clock['now']
     chat._identify_times = [clock['now'] - 3600.0] * (dc.DAILY_IDENTIFY_LIMIT - dc.IDENTIFY_RESERVE)
-    assert chat._identify_refusal() is not None
+    assert chat._identify_gate(FAKE_TOKEN) is None  # Discord said 900 remain; our count says no
+    assert chat._fatal and 'Identify' in chat._fatal
 
 
 def test_identifies_older_than_a_day_do_not_count(chat):
     clock = {'now': 200000.0}
     chat._clock = lambda: clock['now']
     chat._identify_times = [clock['now'] - 90000.0] * dc.DAILY_IDENTIFY_LIMIT
-    assert chat._identify_refusal() is None
+    assert chat._identify_gate(FAKE_TOKEN) == dc.GATEWAY_URL
     assert chat._identify_times == []
 
 
-def test_budget_survives_a_failed_lookup(chat):
-    chat._http = FakeHTTP(gets=[ConnectionError('down')])
-    idents = cycling_run(chat, limit=20.0)
-    assert idents
+@pytest.mark.parametrize('answer', [
+    Resp(503),
+    Resp(200, {'url': 'wss://gateway.discord.gg/'}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': 900}}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': 'many', 'reset_after': 1,
+                                       'max_concurrency': 1}}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': float('nan'), 'reset_after': 1,
+                                       'max_concurrency': 1}}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': 900, 'reset_after': 1,
+                                       'max_concurrency': 0}}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': 900, 'max_concurrency': 1}}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': 900, 'reset_after': 'soon',
+                                       'max_concurrency': 1}}),
+    Resp(200, {'session_start_limit': {'total': 1000, 'remaining': 900, 'reset_after': -1,
+                                       'max_concurrency': 1}}),
+    Resp(200, ['not', 'a', 'dict']),
+    Resp(200, None),
+    TimeoutError('slow'),
+])
+def test_no_valid_start_limit_means_no_fresh_identify(chat, answer):
+    chat._http = FakeHTTP(gets=[answer])
+    ws = run_session(chat, [text(10, HELLO)])
+    assert ws.sent == [] and chat._identify_times == []
+    assert not chat._fatal  # not stopped: the run loop retries with its backoff
+
+
+def test_run_loop_retries_the_lookup_with_backoff_and_never_identifies_blind(chat):
+    clock = {'now': 0.0}
+    chat._http = FakeHTTP(gets=[Resp(503), Resp(503), TimeoutError('t')])
+    behaviours = [FakeWS([text(10, HELLO)])]
+    waits = scripted_run(chat, behaviours, clock)
+    assert waits[:3] == [1.0, 2.0, 4.0]
+    # Three failed lookups, each followed by a longer wait and no Identify; the
+    # fourth answer was healthy.
+    assert len(chat._http.gets) == 4 and chat._identify_times == [7.0]
+
+
+def test_a_held_session_may_resume_without_a_lookup(chat):
+    chat._http = FakeHTTP(gets=[Resp(503)])
+    chat._session_id, chat._resume_url, chat._seq = 'sess', RESUME, 5
+    ws = run_session(chat, [text(10, HELLO)])
+    assert 6 in ws.ops() and chat._http.gets == []
 
 
 def test_start_limit_failure_text_is_not_logged(chat, caplog):
     caplog.set_level(logging.DEBUG)
     chat._http = FakeHTTP(gets=[ConnectionError(f'down {FAKE_TOKEN}')])
-    chat._refresh_start_limit()
+    assert chat._start_limit(FAKE_TOKEN) is None
     assert FAKE_TOKEN not in caplog.text
 
 
@@ -1389,13 +1427,15 @@ def wait_for(predicate, seconds=2.0):
 
 
 def test_global_429_holds_back_sends_to_other_channels(chat):
-    chat._clock = lambda: 100.0
+    clock = {'now': 100.0}
+    chat._clock = lambda: clock['now']
     release = threading.Event()
     sleeps = []
 
     def sleep(seconds):
         sleeps.append(seconds)
         release.wait(5)
+        clock['now'] += seconds
 
     chat._sleep = sleep
     chat._http = FakeHTTP([Resp(429, {'retry_after': 2.0, 'global': True}), Resp(200), Resp(200)])
@@ -1415,36 +1455,76 @@ def test_global_429_holds_back_sends_to_other_channels(chat):
     assert len(chat._http.calls) == 3
 
 
+def test_a_deadline_extended_during_a_wait_is_honoured(chat):
+    """A wakes at the deadline it computed; B has pushed it out meanwhile."""
+    clock = {'now': 100.0}
+    chat._clock = lambda: clock['now']
+    chat._global_until = 101.0
+    asleep, release = threading.Event(), threading.Event()
+    sleeps = []
+    posted_at = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        if len(sleeps) == 1:
+            asleep.set()
+            release.wait(5)
+        clock['now'] += seconds
+
+    class Timing(FakeHTTP):
+        def post(self, url, **kw):
+            posted_at.append(clock['now'])
+            return Resp(200)
+
+    chat._sleep = sleep
+    chat._http = Timing()
+    a = threading.Thread(target=chat.send, args=(CHAN, 'a'))
+    a.start()
+    assert asleep.wait(5)
+    with chat._rate_lock:
+        chat._global_until = 105.0  # another caller met a longer global limit
+    release.set()
+    a.join(5)
+    assert posted_at and posted_at[0] >= 105.0
+
+
+def test_the_wait_cap_is_measured_on_the_clock(chat):
+    slept, clock = ticking(chat)
+    chat._global_until = 100.0 + dc.MAX_RATE_WAIT / 2
+    chat._http = FakeHTTP([Resp(200)])
+    original = chat._sleep
+
+    def sleep(seconds):
+        original(seconds)
+        if len(slept) > 50:  # bounded: without the cap this would never end
+            chat._global_until = 0.0
+            return
+        chat._global_until = clock['now'] + dc.MAX_RATE_WAIT / 2  # always extended
+
+    chat._sleep = sleep
+    assert chat.send(CHAN, 'hi') is False
+    assert chat._http.calls == [] and len(slept) <= 50
+    assert clock['now'] - 100.0 <= dc.MAX_RATE_WAIT
+
+
 def test_global_flag_in_headers_counts_too(chat):
-    chat._clock = lambda: 100.0
-    sleeps = []
-    chat._sleep = sleeps.append
+    sleeps, _ = ticking(chat)
     chat._http = FakeHTTP([Resp(429, None, {'Retry-After': '3', 'X-RateLimit-Global': 'true'}),
-                           Resp(200), Resp(200)])
+                           Resp(200)])
     assert chat.send(CHAN, 'a') is True
-    assert chat.send('700000000000000002', 'b') is True
-    assert sleeps == [3.0, 3.0]
+    assert sleeps == [3.0]
+    assert chat._global_until == 103.0 and chat._rate_until == {}
 
 
-def test_a_429_is_remembered_for_the_bucket(chat):
-    chat._clock = lambda: 100.0
-    sleeps = []
-    chat._sleep = sleeps.append
-    chat._http = FakeHTTP([Resp(429, {'retry_after': 1.5, 'global': False}), Resp(200), Resp(200)])
+def test_a_bucket_429_is_remembered_for_that_channel_only(chat):
+    ticking(chat)
+    chat._http = FakeHTTP([Resp(429, {'retry_after': 1.5, 'global': False}), Resp(200)])
     assert chat.send(CHAN, 'a') is True
-    assert chat.send(CHAN, 'b') is True
-    assert sleeps == [1.5, 1.5]
-    # A different channel is not held up by a per-channel limit.
-    sleeps.clear()
-    chat._http.responses.append(Resp(200))
-    assert chat.send('700000000000000002', 'c') is True
-    assert sleeps == []
+    assert chat._rate_until == {CHAN: 101.5} and chat._global_until == 0.0
 
 
 def test_same_channel_sends_are_serialised(chat):
-    chat._clock = lambda: 100.0
-    sleeps = []
-    chat._sleep = sleeps.append
+    sleeps, _ = ticking(chat)
     in_flight, release = threading.Event(), threading.Event()
     exhausted = {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset-After': '2.0'}
 
@@ -1479,8 +1559,7 @@ def test_same_channel_sends_are_serialised(chat):
 
 @pytest.mark.parametrize('bad', [float('nan'), float('inf'), float('-inf'), 'nan', 'inf'])
 def test_non_finite_retry_after_is_rejected(chat, bad):
-    sleeps = []
-    chat._sleep = sleeps.append
+    sleeps, _ = ticking(chat)
     chat._http = FakeHTTP([Resp(429, {'retry_after': bad}), Resp(200)])
     assert chat.send(CHAN, 'hi') is False
     assert sleeps == [] and len(chat._http.calls) == 1
@@ -1490,8 +1569,7 @@ def test_non_finite_retry_after_is_rejected(chat, bad):
 
 
 def test_non_finite_reset_after_does_not_wedge_the_bucket(chat):
-    sleeps = []
-    chat._sleep = sleeps.append
+    sleeps, _ = ticking(chat)
     chat._http = FakeHTTP([
         Resp(200, None, {'X-RateLimit-Remaining': '0', 'X-RateLimit-Reset-After': 'inf'}),
         Resp(200)])
@@ -1516,3 +1594,364 @@ def test_connect_refuses_a_handshake_that_is_not_an_upgrade(chat, monkeypatch):
     with pytest.raises(websocket.WebSocketException):
         chat._connect(dc.GATEWAY_URL)
     assert ws.closed is True
+
+
+# -- foreign code never takes the worker down or leaks a token ------------
+
+def hook_excepthook(monkeypatch):
+    escaped = []
+    monkeypatch.setattr(threading, 'excepthook', escaped.append)
+    return escaped
+
+
+def raising_with_context():
+    try:
+        raise OSError(f'transport said {FAKE_TOKEN}')
+    except OSError as inner:
+        raise BaseException(f'handler said {FAKE_TOKEN}') from inner
+
+
+def test_handler_base_exception_is_contained_and_the_next_event_is_delivered(chat, caplog, capsys):
+    caplog.set_level(logging.DEBUG)
+    got = []
+
+    def handler(event):
+        if not got:
+            got.append(event)
+            raising_with_context()
+        got.append(event)
+
+    chat._handler = handler
+    run_session(chat, [
+        text(10, HELLO),
+        text(0, msg(), s=2, t='MESSAGE_CREATE'),
+        text(0, msg(id='400000000000000002'), s=3, t='MESSAGE_CREATE'),
+    ])
+    assert [e.message_id for e in got] == ['400000000000000001', '400000000000000002']
+    assert 'BaseException' in caplog.text
+    out = capsys.readouterr()
+    assert FAKE_TOKEN not in caplog.text + out.out + out.err
+
+
+def test_base_exception_in_a_live_worker_keeps_it_running(chat, monkeypatch, capsys):
+    escaped = hook_excepthook(monkeypatch)
+    seen = []
+
+    def handler(event):
+        seen.append(event)
+        if len(seen) == 1:
+            raising_with_context()
+
+    ws = FakeWS([text(10, HELLO), text(0, msg(), s=2, t='MESSAGE_CREATE'),
+                 text(0, msg(id='400000000000000002'), s=3, t='MESSAGE_CREATE')],
+                on_empty=lambda: time.sleep(0.01))
+    chat._connect = lambda url: ws
+    chat.start(handler)
+    try:
+        assert wait_for(lambda: len(seen) == 2)
+        assert chat._thread.is_alive() and chat.is_available() is True
+    finally:
+        chat.stop()
+    out = capsys.readouterr()
+    assert escaped == [] and FAKE_TOKEN not in out.out + out.err
+
+
+def test_worker_top_level_failure_surfaces_as_unavailable_and_heals(chat, monkeypatch, caplog, capsys):
+    escaped = hook_excepthook(monkeypatch)
+    caplog.set_level(logging.DEBUG)
+
+    def boom():
+        raising_with_context()
+
+    chat._session = boom
+    chat.start(lambda e: None)
+    chat._thread.join(5)
+    assert not chat._thread.is_alive() and escaped == []
+    assert chat._fatal and 'BaseException' in chat._fatal
+    assert chat.is_available() is False
+    out = capsys.readouterr()
+    assert FAKE_TOKEN not in caplog.text + chat._fatal + out.out + out.err
+    del chat._session
+    chat._connect = lambda url: FakeWS([text(10, HELLO)], on_empty=lambda: time.sleep(0.01))
+    chat.start(lambda e: None)  # the documented restart clears the failure
+    try:
+        assert chat._fatal is None and chat._thread.is_alive()
+    finally:
+        chat.stop()
+
+
+def test_send_contains_base_exceptions(chat, caplog):
+    caplog.set_level(logging.DEBUG)
+    chat._http = FakeHTTP([BaseException(f'boom {FAKE_TOKEN}')])
+    assert chat.send(CHAN, 'hi') is False
+    assert FAKE_TOKEN not in caplog.text and 'BaseException' in caplog.text
+
+
+# -- one atomic configuration snapshot ------------------------------------
+
+def test_a_reload_never_widens_the_filter_while_it_is_in_flight(chat, monkeypatch):
+    monkeypatch.setenv('DISCORD_GUILD_ID', GUILD)
+    chat._load_config()
+    real = dc.platform_secret
+    paused, go = threading.Event(), threading.Event()
+
+    def slow(platform, key, *args, **kwargs):
+        if key == 'moderator_role_ids':  # the last setting read: parsed but not yet published
+            paused.set()
+            go.wait(5)
+        return real(platform, key, *args, **kwargs)
+
+    monkeypatch.setattr(dc, 'platform_secret', slow)
+    outsider = msg(guild_id='800000000000000009')
+    reload_ = threading.Thread(target=chat._load_config)
+    reload_.start()
+    assert paused.wait(5)
+    try:
+        assert chat.to_event(outsider) is None
+        assert chat.to_event(msg()) is not None
+    finally:
+        go.set()
+        reload_.join(5)
+    assert chat.to_event(outsider) is None
+    assert chat.to_event(msg()) is not None
+
+
+def test_a_reload_that_adds_an_error_is_all_or_nothing(chat, monkeypatch):
+    before = chat._cfg
+    monkeypatch.setenv('DISCORD_GUILD_ID', 'oops')
+    after = chat._load_config()
+    assert after is chat._cfg and after is not before
+    assert before.error is None and after.error and after.guild_id is None
+
+
+def test_the_snapshot_does_not_print_the_token():
+    assert FAKE_TOKEN not in repr(dc._Config(token=FAKE_TOKEN))
+
+
+def test_a_different_reloaded_token_never_resumes_the_old_session(chat, monkeypatch):
+    chat._session_id, chat._resume_url, chat._seq = 'sess', RESUME, 5
+    chat._active = chat._cfg
+    monkeypatch.setenv('DISCORD_BOT_TOKEN', 'SYNTHETIC-NEW-bbbbbbbb')
+    chat.is_available()
+    urls = []
+    ws = FakeWS([text(10, HELLO)])
+    chat._connect = lambda url: urls.append(url) or ws
+    chat._wait = lambda s: False
+    chat._stop_event.clear()
+    chat._session()
+    assert urls and urls[0].startswith('wss://gateway.discord.gg/')
+    assert ws.ops() == [2] and ws.sent[0]['d']['token'] == 'SYNTHETIC-NEW-bbbbbbbb'
+    assert FAKE_TOKEN not in json.dumps(ws.sent)
+
+
+def test_a_reload_of_the_same_token_still_resumes(chat):
+    chat._session_id, chat._resume_url, chat._seq = 'sess', RESUME, 5
+    chat._active = chat._cfg
+    chat.is_available()
+    chat.is_available()
+    ws = run_session(chat, [text(10, HELLO)])
+    assert ws.ops() == [6]
+
+
+# -- the automatic close acknowledgement ----------------------------------
+
+def sent_close_status(resumable):
+    """Feed a real reader a server close frame; decode what it transmitted."""
+    ws, far = real_ws(max_bytes=1000)
+    try:
+        ws.resumable = resumable
+        far.sendall(bytes([0x88, 2]) + struct.pack('!H', 1001))
+        opcode, frame = ws.recv_data_frame(True)
+        assert opcode == 8
+        far.settimeout(2)
+        raw = far.recv(64)
+        assert raw[0] == 0x88 and raw[1] & 0x80  # a masked close frame
+        length, mask = raw[1] & 0x7F, raw[2:6]
+        body = bytes(b ^ mask[i % 4] for i, b in enumerate(raw[6:6 + length]))
+        return struct.unpack('!H', body[:2])[0]
+    finally:
+        ws.sock.close()
+        far.close()
+
+
+def test_the_libraries_own_close_ack_keeps_a_resumable_session():
+    assert sent_close_status(True) == dc.RESUMABLE_CLOSE_CODE
+
+
+def test_the_libraries_own_close_ack_is_orderly_when_not_resumable():
+    assert sent_close_status(False) == dc.ORDERLY_CLOSE_CODE
+
+
+def test_the_session_tells_the_reader_whether_a_close_is_resumable(chat):
+    seen = []
+
+    class Watching(FakeWS):
+        def recv_data_frame(self, control_frame):
+            seen.append(getattr(self, 'resumable', None))
+            return super().recv_data_frame(control_frame)
+
+    ws = Watching([text(10, HELLO), text(0, READY_BODY, s=1, t='READY'),
+                   lambda: (chat._stop_event.set(), text(11))[1]])
+    chat._connect = lambda url: ws
+    chat._wait = lambda s: False
+    chat._stop_event.clear()
+    chat._session()
+    assert seen == [False, False, True]
+
+
+# -- the reader is probed, and fails closed -------------------------------
+
+def test_the_installed_reader_passes_its_probe():
+    assert dc._reader_error() is None
+
+
+def test_a_missing_or_renamed_hook_is_reported(monkeypatch):
+    from websocket import _abnf
+    monkeypatch.delattr(_abnf.frame_buffer, 'recv_length')
+    cls, reason = dc._make_bounded_websocket()
+    assert cls is None and 'recv_length' in reason
+
+
+def test_a_non_integer_length_fails_closed(monkeypatch):
+    from websocket import _abnf
+    original = _abnf.frame_buffer.recv_length
+
+    def odd(self):
+        original(self)
+        self.length = '5'
+
+    monkeypatch.setattr(_abnf.frame_buffer, 'recv_length', odd)
+    cls, reason = dc._make_bounded_websocket()
+    assert cls is not None and dc._probe_reader(cls)
+    # And the reader itself refuses, even an ordinary frame, rather than trust it.
+    near, far = socket.socketpair()
+    try:
+        near.settimeout(0.5)
+        ws = cls(max_bytes=100)
+        ws.sock = near
+        ws.connected = True
+        far.sendall(frame_header(5) + b'hello')
+        with pytest.raises(dc.MessageTooLarge):
+            ws.recv_data_frame(True)
+    finally:
+        near.close()
+        far.close()
+
+
+def test_a_trusting_reader_fails_the_probe():
+    assert 'not refused' in dc._probe_reader(websocket.WebSocket)
+
+
+@pytest.mark.parametrize('broken', ['no_class', 'probe_fails'])
+def test_an_unusable_reader_means_unavailable_and_no_connection(chat, monkeypatch, caplog, broken):
+    if broken == 'no_class':
+        monkeypatch.setattr(dc, '_BoundedWebSocket', None)
+        monkeypatch.setattr(dc, '_BOUNDED_ERROR', 'frame_buffer.recv_length is missing')
+    else:
+        monkeypatch.setattr(dc, '_probe_reader', lambda cls: 'an oversize frame was accepted')
+    monkeypatch.setattr(dc, '_reader_cache', None)
+    caplog.set_level(logging.WARNING)
+    connects = []
+    chat._connect = connects.append
+    assert chat.is_available() is False and chat.is_available() is False
+    assert len([r for r in caplog.records if 'size-bounded reader' in r.getMessage()]) == 1
+    assert websocket.__version__ in caplog.text
+    chat.start(lambda e: None)
+    assert chat._thread is None and connects == []
+    with pytest.raises(OSError):
+        DiscordChat._connect(chat, dc.GATEWAY_URL)
+
+
+# -- DISCORD_MAX_EVENT_BYTES ----------------------------------------------
+
+def test_default_event_limit_is_two_mib(chat):
+    assert chat._cfg.max_event_bytes == 2 * 1024 * 1024
+
+
+@pytest.mark.parametrize('value', ['4096', str(dc.MAX_EVENT_BYTES_CEILING), ' 1048576 '])
+def test_event_limit_setting_is_read(chat, monkeypatch, value):
+    monkeypatch.setenv('DISCORD_MAX_EVENT_BYTES', value)
+    assert chat.is_available() is True
+    assert chat._cfg.max_event_bytes == int(value)
+
+
+@pytest.mark.parametrize('value', ['0', '-5', 'big', '1.5', '2MiB', '٣٤',
+                                   str(dc.MAX_EVENT_BYTES_CEILING + 1), '9' * 30])
+def test_invalid_event_limit_fails_closed_naming_the_setting(chat, monkeypatch, caplog, value):
+    monkeypatch.setenv('DISCORD_MAX_EVENT_BYTES', value)
+    caplog.set_level(logging.DEBUG)
+    assert chat.is_available() is False
+    assert 'DISCORD_MAX_EVENT_BYTES' in caplog.text
+    assert len(value) < 4 or value not in caplog.text
+    assert chat.to_event(msg()) is None
+
+
+def test_an_event_over_the_cap_stops_the_receiver_instead_of_replaying(chat, monkeypatch, caplog):
+    monkeypatch.setenv('DISCORD_MAX_EVENT_BYTES', '1000')
+    chat._load_config()
+    caplog.set_level(logging.WARNING)
+    connects = []
+    big = (1, Frame(b'x' * 1001))
+    chat._seq = None
+
+    def connect(url):
+        connects.append(url)
+        return FakeWS([text(10, HELLO), text(0, READY_BODY, s=1, t='READY'), big])
+
+    chat._connect = connect
+    chat._wait = lambda s: pytest.fail('a stopped receiver must not wait to reconnect')
+    chat._run()
+    assert len(connects) == 1
+    assert chat._fatal and 'DISCORD_MAX_EVENT_BYTES' in chat._fatal and 'raise' in chat._fatal
+    assert len([r for r in caplog.records if r.levelno >= logging.ERROR]) == 1
+    assert chat.is_available() is False
+    assert chat._seq == 1  # the oversize event's sequence number was never taken
+
+
+def test_a_real_frame_over_the_configured_cap_is_refused_before_its_payload():
+    ws, far = real_ws(max_bytes=1000)
+    try:
+        far.sendall(frame_header(1001) + b'x' * 50)
+        with pytest.raises(dc.MessageTooLarge):
+            ws.recv_data_frame(True)
+        far.setblocking(False)
+        assert ws.sock.recv(100, socket.MSG_PEEK) == b'x' * 50
+    finally:
+        ws.sock.close()
+        far.close()
+
+
+# -- striped send locks ---------------------------------------------------
+
+def test_a_channels_lock_keeps_its_identity_across_many_other_channels(chat):
+    chat._clock = lambda: 100.0
+    in_flight, release = threading.Event(), threading.Event()
+
+    class Blocking(FakeHTTP):
+        def post(self, url, **kw):
+            with self.lock:
+                first = not self.calls
+                self.calls.append((url, kw))
+            if first:
+                in_flight.set()
+                release.wait(5)
+            return Resp(200)
+
+    chat._http = Blocking()
+    a = threading.Thread(target=chat.send, args=(CHAN, 'a'))
+    a.start()
+    assert in_flight.wait(5)
+    others = [str(700000000100000 + i) for i in range(400)]
+    others = [c for c in others if int(c) % dc.LOCK_STRIPES != int(CHAN) % dc.LOCK_STRIPES]
+    for channel in others:  # far more than any old eviction threshold
+        assert chat.send(channel, 'x') is True
+    b = threading.Thread(target=chat.send, args=(CHAN, 'b'))
+    b.start()
+    try:
+        time.sleep(0.3)
+        assert len(chat._http.calls) == 1 + len(others)  # B is still waiting behind A
+    finally:
+        release.set()
+        a.join(5)
+        b.join(5)
+    assert len(chat._http.calls) == 2 + len(others)

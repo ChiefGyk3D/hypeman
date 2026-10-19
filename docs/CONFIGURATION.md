@@ -381,6 +381,7 @@ as `DISCORD_<KEY>`.
 | `DISCORD_BOT_TOKEN` | Bot token (secret chain). Never logged | required |
 | `DISCORD_GUILD_ID` | Only hear this guild | all guilds the bot is in |
 | `DISCORD_CHANNEL_IDS` | Comma-separated channel ids to hear | all text channels the bot can see |
+| `DISCORD_MAX_EVENT_BYTES` | Largest inbound Gateway frame or message, in bytes. An event over it stops the receiver with one error naming this setting. Positive integer, at most 67108864; anything else fails closed | `2097152` (2 MiB) |
 | `DISCORD_MODERATOR_ROLE_IDS` | Comma-separated role ids that map to the moderator role | none (nobody is a moderator) |
 
 ## Social: Matrix

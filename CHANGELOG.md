@@ -128,6 +128,16 @@ All notable changes to hypeman-social. The format follows
   deduplicated with an enforced nonce; shared global and per-channel rate-limit
   deadlines; `start()` heals a fatal close; invalid configured filters fail
   closed.
+- **Discord chat hardening, second round**: handlers and the worker are fenced
+  with `except BaseException` (class name only in logs); settings are read as one
+  atomic snapshot and a reloaded different token never resumes the old session;
+  the reader's automatic close acknowledgement keeps a resumable session (4000
+  not 1000); the size-bounded reader is probed and the adapter fails closed
+  without it; a valid `GET /gateway/bot` answer is required before any fresh
+  Identify, spaced a flat 5 s; deadlines are re-read after every rate-limit wait;
+  striped per-channel send locks replace the evicting dict; new
+  `DISCORD_MAX_EVENT_BYTES` (default 2 MiB), and an event over it stops the
+  receiver instead of looping on replay.
 
 ## [0.3.4] — 2026-10-09
 

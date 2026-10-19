@@ -128,24 +128,49 @@ stop the receiver.
   Discord's docs that this host set is exhaustive for `resume_gateway_url`; if
   Discord ever hands out another domain the bot will log an untrusted-URL error
   and fall back to a fresh Identify rather than send the token there.
-- **Receive limits.** A frame or reassembled message over 2 MiB (encoded
-  bytes, `MAX_MESSAGE_BYTES`) is refused and the connection is closed (1009)
-  and resumed. With websocket-client's frame buffer the length field is checked
-  right after the header, before the payload is read, and the cap on a
-  fragmented message shrinks as fragments arrive. Residual: if a future
-  websocket-client renames that internal hook, the guard falls back to a check
-  after each frame is read, so one frame up to its declared length is buffered
-  first. A legitimate `GUILD_CREATE` for an enormous guild larger than 2 MiB
-  would be refused repeatedly; raise the constant if that is you.
-- **Identify limits.** At startup the bot reads `GET /gateway/bot` for
-  `session_start_limit` and `max_concurrency` (and the gateway URL). Identifies
-  are spaced 5 seconds divided by `max_concurrency`. The bot keeps a rolling
-  24-hour count of its own Identifies and a reserve of 20: when the count (or
-  Discord's reported `remaining`) reaches the reserve it stops with one error
-  instead of burning the allowance, because hitting the daily limit resets the
-  token. Failure backoff runs from 1 second to 5 minutes and is only reset after
-  a connection stayed up 60 seconds past READY or RESUMED, so a loop of
-  Identify, READY, session lost cannot spin.
+- **Receive limits.** A frame or reassembled message over `DISCORD_MAX_EVENT_BYTES`
+  (encoded bytes; default 2 MiB, at most 64 MiB) is refused. The check runs right
+  after a frame header is read, before the payload is allocated, and counts
+  fragments cumulatively. It leans on websocket-client internals, so the adapter
+  **probes** them on an in-process socket pair before it will start: if the hook
+  is missing, renamed, or does not refuse an oversize frame, `is_available()` is
+  False with one error naming the installed websocket-client version, and no
+  connection is made with the stock reader (supported: `websocket-client>=1.6.0,<2`).
+  An event over the cap is a **stopped condition**, not a retry: Discord would
+  replay it on every Resume and a fresh session would burn Identifies, so the
+  receiver goes unavailable with one error that names the setting. Raise
+  `DISCORD_MAX_EVENT_BYTES` (for a very large guild's `GUILD_CREATE`) and call
+  `start()`. A value that is not a positive integer up to the ceiling is an
+  invalid setting and fails closed like the filters.
+- **Identify limits.** Before every fresh Identify the bot asks `GET /gateway/bot`
+  and needs a complete, valid `session_start_limit` (`total`, `remaining`,
+  `reset_after`, `max_concurrency`). Without one it does not Identify: it retries
+  with the 1 second to 5 minute backoff (a Resume of a held session needs no
+  lookup). Identifies are always 5 seconds apart, whatever `max_concurrency` is:
+  an unsharded client is always in bucket 0 (`shard_id % max_concurrency`), so
+  that value is no licence to go faster. The bot also keeps a rolling 24-hour
+  count of its own Identifies and a reserve of 20: when the count (or Discord's
+  reported `remaining`) reaches the reserve it stops with one error instead of
+  burning the allowance, because hitting the daily limit resets the token. The
+  failure backoff is only reset after a connection stayed up 60 seconds past
+  READY or RESUMED, so a loop of Identify, READY, session lost cannot spin.
+- **Configuration is read as one snapshot.** Every setting is parsed first and
+  published together, so a reload (`is_available()` re-reads) can never leave a
+  filter half-applied. A session belongs to the credential that created it: after
+  a reload with a different token the bot Identifies fresh and never Resumes the
+  old credential's session.
+- **Foreign code is fenced.** A handler that raises anything, `BaseException`
+  included, is logged by class name only and the receiver carries on with the next
+  event. If the worker itself dies, `is_available()` reports it (and `start()`
+  restarts it); nothing reaches Python's thread excepthook, which would print the
+  exception with its chained context.
+- **Session-keeping close.** websocket-client acknowledges a server close frame
+  itself, with status 1000, which Discord treats as ending the session. The
+  adapter's reader sends 4000 instead while a session is held, and 1000 on a
+  real shutdown.
+- **Never enable websocket-client's trace** (`websocket.enableTrace(True)`) in
+  production: it logs raw frames, including the Identify payload with the bot
+  token.
 - **Stopping.** `stop()` ends the worker and, if it is blocked, closes the
   socket. `shutdown()` does the same and returns False (with an error log) if
   the worker still did not exit; `start()` refuses while any worker is alive, so
