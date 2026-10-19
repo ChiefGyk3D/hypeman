@@ -562,7 +562,7 @@ class TwitchChat(ChatReceiver):
             try:
                 reset_secret_cache()
             except Exception as e:
-                logger.debug('Twitch credential cache reset failed: %s', type(e).__name__)
+                logger.debug('Twitch cache reset failed: %s', type(e).__name__)
         if not self._load_credentials():
             return False
 
