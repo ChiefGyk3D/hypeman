@@ -26,7 +26,7 @@ Create `.env` (full reference: [CONFIGURATION.md](CONFIGURATION.md)):
 LLM_ENABLE=true
 LLM_PROVIDER=ollama
 LLM_OLLAMA_HOST=http://localhost
-LLM_OLLAMA_MODEL=gemma3:4b
+LLM_OLLAMA_MODEL=gemma4:12b
 LLM_FALLBACK_PROVIDER=gemini      # optional; delete to stay fully local
 GEMINI_API_KEY=...                # only if you kept the fallback
 

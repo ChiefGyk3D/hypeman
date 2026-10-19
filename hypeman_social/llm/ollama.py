@@ -34,13 +34,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_MODEL = 'gemma4:12b'
+
 
 class OllamaLLM(BaseLLM):
     """
     Local LLM generation via an Ollama server.
 
     No cloud API costs, no rate limits, and your video titles never leave your
-    network. Supports gemma3, qwen2.5/3, llama3, mistral, and anything else
+    network. Supports gemma3/4, qwen2.5/3, llama3, mistral, and anything else
     Ollama will load.
     """
 
@@ -51,6 +53,15 @@ class OllamaLLM(BaseLLM):
         self.client: Optional[Any] = None
         self.host: Optional[str] = None
         self.model: Optional[str] = None
+
+        # Optional, sent only when configured (None means "do not send").
+        # num_ctx is passed EXACTLY as configured: on a shared GPU, a num_ctx
+        # that differs from the one the model is currently loaded with makes
+        # Ollama reload the model, which can evict another resident model.
+        # We never pick a number ourselves. keep_alive lets a non-resident
+        # model be given a short residency.
+        self.num_ctx: Optional[int] = None
+        self.keep_alive: Optional[str] = None
 
         # True when the loaded model advertises the 'thinking' capability.
         # Detected at connect time; controls whether we pass `think` at all,
@@ -76,7 +87,10 @@ class OllamaLLM(BaseLLM):
                 'LLM', 'ollama_port', default='11434')
             # LLM_OLLAMA_MODEL wins over the shared LLM_MODEL, so a Gemini
             # fallback and a local Ollama primary can each name their own.
-            self.model = self.provider_config('model', default='gemma3:4b')
+            self.model = self.provider_config('model', default=DEFAULT_MODEL)
+
+            self.num_ctx = self._read_num_ctx()
+            self.keep_alive = self.provider_config('keep_alive') or None
 
             if not host.startswith('http'):
                 host = f"http://{host}"
@@ -113,6 +127,20 @@ class OllamaLLM(BaseLLM):
             self._last_error = f"{type(e).__name__}: {e}"
             self.enabled = False
             return False
+
+    def _read_num_ctx(self) -> Optional[int]:
+        """Parse LLM_OLLAMA_NUM_CTX; unset or invalid means do not send it."""
+        raw = self.provider_config('num_ctx')
+        if not raw:
+            return None
+        try:
+            value = int(str(raw).strip())
+        except ValueError:
+            value = 0
+        if value <= 0:
+            logger.warning(f"⚠ Ignoring invalid num_ctx {raw!r}; not sending it")
+            return None
+        return value
 
     def _reconnect(self) -> bool:
         """
@@ -221,14 +249,20 @@ class OllamaLLM(BaseLLM):
         if self._supports_thinking:
             extra['think'] = bool(self.enable_thinking_mode)
 
+        options = {
+            'num_predict': max_tokens,
+            'temperature': self.temperature,
+            'top_p': self.top_p,
+        }
+        if self.num_ctx is not None:
+            options['num_ctx'] = self.num_ctx
+        if self.keep_alive:
+            extra['keep_alive'] = self.keep_alive
+
         response = self.client.generate(
             model=self.model,
             prompt=prompt,
-            options={
-                'num_predict': max_tokens,
-                'temperature': self.temperature,
-                'top_p': self.top_p,
-            },
+            options=options,
             **extra,
         )
 
