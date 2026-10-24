@@ -11,6 +11,7 @@ import os
 import re
 import time
 from typing import Optional
+from urllib.parse import quote, unquote, urlsplit
 
 import requests
 
@@ -132,8 +133,18 @@ class DiscordPlatform(SocialPlatform):
         redacted = _WEBHOOK_PATH.sub('/api/webhooks/' + _REDACTED, str(text))
         held = [self.webhook_url, *self.webhook_urls.values(),
                 *(m.get('webhook_url') for m in self.active_messages.values())]
-        for url in sorted({u for u in held if u}, key=len, reverse=True):
-            redacted = redacted.replace(url, _REDACTED)
+        needles = set()
+        for url in held:
+            if not url:
+                continue
+            needles.add(url)
+            # urllib3 reports "Max retries exceeded with url: /path" without the
+            # host, so the path alone (raw and percent-decoded) must go too.
+            path = urlsplit(url).path
+            if len(path.strip('/')) >= 6:
+                needles.update({path, unquote(path), quote(unquote(path))})
+        for needle in sorted(needles, key=len, reverse=True):
+            redacted = redacted.replace(needle, _REDACTED)
         return redacted
 
     def authenticate(self):

@@ -144,6 +144,33 @@ class TestTokenNotLogged:
         assert 'Discord post failed' in caplog.text
         assert_no_token(caplog, TOKEN)
 
+    def test_path_only_message_from_urllib3_is_redacted(self, monkeypatch, caplog):
+        """urllib3 reports 'Max retries exceeded with url: /path' (no host), so a
+        proxy URL whose token sits in a non-standard path must be caught by path."""
+        proxy = f'https://hooks.example/relay/v2/{TOKEN}'
+        platform = make_platform(monkeypatch, webhook=proxy)
+        text = ("HTTPSConnectionPool(host='hooks.example', port=443): Max retries "
+                f"exceeded with url: /relay/v2/{TOKEN}?wait=true "
+                "(Caused by NewConnectionError('boom'))")
+        monkeypatch.setattr(f'{MOD}.requests.post',
+                            raising(lambda url: requests.ConnectionError(text)))
+        with caplog.at_level(logging.DEBUG):
+            assert platform.post('hello', platform_name='twitch') is None
+        assert 'Discord post failed' in caplog.text
+        assert 'hooks.example' in caplog.text or 'Max retries' in caplog.text
+        assert_no_token(caplog, TOKEN)
+
+    def test_percent_encoded_path_is_redacted(self, monkeypatch, caplog):
+        token = 'tok/en with space'
+        proxy = 'https://hooks.example/relay/tok%2Fen%20with%20space'
+        platform = make_platform(monkeypatch, webhook=proxy)
+        text = 'Max retries exceeded with url: /relay/tok%2Fen%20with%20space?wait=true'
+        monkeypatch.setattr(f'{MOD}.requests.post',
+                            raising(lambda url: requests.ConnectionError(text)))
+        with caplog.at_level(logging.DEBUG):
+            assert platform.post('hello', platform_name='twitch') is None
+        assert 'tok%2Fen' not in caplog.text and token not in caplog.text
+
     def test_per_platform_webhook_string_redacted(self, monkeypatch, caplog):
         other = f'https://hooks.example/other/{TOKEN}-twitch'
         monkeypatch.setenv('DISCORD_WEBHOOK_TWITCH', other)
