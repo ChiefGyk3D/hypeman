@@ -6,6 +6,18 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+### Security
+- **Discord: the webhook token no longer reaches the logs.** The three error
+  handlers in `post`, `update_stream` and `end_stream` log the exception text,
+  and a `requests` error carries the full webhook URL. That text now has any
+  `/api/webhooks/<id>/<token>` path and every webhook URL the instance holds
+  redacted first.
+- **Discord: every webhook payload (post, update, stream-ended) sends
+  `allowed_mentions`** that parses nothing and allows only the role the post
+  itself appended, so `@everyone` or `@here` in a title or generated text no
+  longer pings the server. The role is stored with the active message so the
+  edits keep allowing it. A role mention in your config works as before.
+
 ### Changed
 - **The Ollama default model is now `gemma4:12b` (was `gemma3:4b`).** Any
   daemon that sets no `LLM_OLLAMA_MODEL` / `LLM_MODEL` will ask its server for
