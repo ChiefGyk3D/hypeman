@@ -20,11 +20,10 @@ a rejected parameter would fail every call. Reasoning effort is the knob.
 """
 
 import logging
-import os
 import threading
 from typing import Any, Dict, Optional
 
-from hypeman_social.config import get_secret
+from hypeman_social.config import get_env_secret, get_secret
 from hypeman_social.config.config import get_exact_config
 from hypeman_social.llm._cloud import (
     OPENAI_DEFAULT_BASE_URL,
@@ -131,7 +130,7 @@ class OpenAILLM(CloudProviderMixin, BaseLLM):
                 doppler_secret_env=f'SECRETS_DOPPLER_{scope}_SECRET_NAME',
             )
             if not self.api_key:
-                self.api_key = os.getenv('OPENAI_API_KEY')
+                self.api_key = get_env_secret('OPENAI_API_KEY')
 
             if not self.api_key:
                 logger.error("✗ OpenAI enabled but no API key found")

@@ -16,10 +16,9 @@ never sent; steer behaviour from the prompt instead.
 """
 
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
-from hypeman_social.config import get_secret
+from hypeman_social.config import get_env_secret, get_secret
 from hypeman_social.config.config import get_exact_config
 from hypeman_social.llm._cloud import (
     ANTHROPIC_DEFAULT_BASE_URL,
@@ -123,7 +122,7 @@ class ClaudeLLM(CloudProviderMixin, BaseLLM):
                 doppler_secret_env=f'SECRETS_DOPPLER_{scope}_SECRET_NAME',
             )
             if not self.api_key:
-                self.api_key = os.getenv('ANTHROPIC_API_KEY')
+                self.api_key = get_env_secret('ANTHROPIC_API_KEY')
 
             if not self.api_key:
                 logger.error("✗ Claude enabled but no API key found")
