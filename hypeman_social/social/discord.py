@@ -11,6 +11,7 @@ import os
 import re
 import time
 from typing import Optional
+from urllib.parse import quote, unquote, urlsplit
 
 import requests
 
@@ -26,6 +27,19 @@ from hypeman_social.social.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# A webhook URL carries its credential in the path: /api/webhooks/<id>/<token>.
+# A requests exception puts the full request URL in its text.
+_WEBHOOK_PATH = re.compile(r'/api/(?:v\d+/)?webhooks/\d+/[^\s/?#"\'<>)\]]+')
+_REDACTED = '[redacted webhook]'
+
+
+def _allowed_mentions(role_id: Optional[str]) -> dict:
+    """Parse no mentions; allow only the role the post itself appended."""
+    allowed: dict = {"parse": []}
+    if role_id:
+        allowed["roles"] = [str(role_id)]
+    return allowed
 
 
 def _star_embed(message: str, repo_url: str, stream_data: dict) -> dict:
@@ -110,6 +124,29 @@ class DiscordPlatform(SocialPlatform):
         self.role_mentions: dict = {}  # platform_name -> role_id mapping
         self.active_messages: dict = {}  # platform_name -> {message_id, webhook_url, last_update} tracking
         
+    def _redact(self, text: object) -> str:
+        """Strip webhook credentials from text before it is logged.
+
+        Removes any /api/webhooks/<id>/<token> path, then every webhook URL
+        this instance holds (a proxy-style URL has no such path).
+        """
+        redacted = _WEBHOOK_PATH.sub('/api/webhooks/' + _REDACTED, str(text))
+        held = [self.webhook_url, *self.webhook_urls.values(),
+                *(m.get('webhook_url') for m in self.active_messages.values())]
+        needles = set()
+        for url in held:
+            if not url:
+                continue
+            needles.add(url)
+            # urllib3 reports "Max retries exceeded with url: /path" without the
+            # host, so the path alone (raw and percent-decoded) must go too.
+            path = urlsplit(url).path
+            if len(path.strip('/')) >= 6:
+                needles.update({path, unquote(path), quote(unquote(path))})
+        for needle in sorted(needles, key=len, reverse=True):
+            redacted = redacted.replace(needle, _REDACTED)
+        return redacted
+
     def authenticate(self):
         if not get_bool_config('Discord', 'enable_posting', default=False):
             return False
@@ -254,16 +291,18 @@ class DiscordPlatform(SocialPlatform):
             # Build content: LLM message + role mention. Star embeds carry the
             # message in their description, so the content is just the mention.
             content = '' if (embed is not None and is_star) else message
+            appended_role: Optional[str] = None
 
             # Add role mention if configured for this platform
             # Normalize platform name (strip suffixes like -videos, -livestreams)
             platform_base = platform_name.lower().split('-')[0] if platform_name else None
             if platform_base and platform_base in self.role_mentions:
-                role_id = self.role_mentions[platform_base]
-                content = f"{content} <@&{role_id}>".strip()
+                appended_role = self.role_mentions[platform_base]
             elif self.role_id:
                 # Use default role if no platform-specific role
-                content = f"{content} <@&{self.role_id}>".strip()
+                appended_role = self.role_id
+            if appended_role:
+                content = f"{content} <@&{appended_role}>".strip()
             
             # Build webhook payload
             data: dict = {}
@@ -271,6 +310,7 @@ class DiscordPlatform(SocialPlatform):
                 data["content"] = content
             if embed:
                 data["embeds"] = [embed]
+            data["allowed_mentions"] = _allowed_mentions(appended_role)
             
             # Add ?wait=true to get the message ID back
             webhook_url_with_wait = webhook_url + "?wait=true" if "?" not in webhook_url else webhook_url + "&wait=true"
@@ -286,7 +326,8 @@ class DiscordPlatform(SocialPlatform):
                         'message_id': message_id,
                         'webhook_url': webhook_url,
                         'last_update': time.time(),
-                        'original_content': content  # Store LLM message + role mention
+                        'original_content': content,  # Store LLM message + role mention
+                        'allowed_role': appended_role,  # PATCH payloads keep allowing it
                     }
                 logger.info(f"✓ Discord embed posted (ID: {message_id})")
                 return message_id
@@ -294,7 +335,7 @@ class DiscordPlatform(SocialPlatform):
                 logger.warning(f"⚠ Discord post failed with status {response.status_code}")
             return None
         except Exception as e:
-            logger.error(f"✗ Discord post failed: {type(e).__name__}: {e}")
+            logger.error("✗ Discord post failed: %s: %s", type(e).__name__, self._redact(e))
             return None
     
     def update_stream(self, platform_name: str, stream_data: dict, stream_url: str) -> bool:
@@ -374,6 +415,7 @@ class DiscordPlatform(SocialPlatform):
             if content:
                 data["content"] = content
             data["embeds"] = [embed]
+            data["allowed_mentions"] = _allowed_mentions(msg_info.get('allowed_role'))
             
             # PATCH the message via webhook
             edit_url = f"{webhook_url}/messages/{message_id}"
@@ -388,7 +430,7 @@ class DiscordPlatform(SocialPlatform):
                 return False
                 
         except Exception as e:
-            logger.error(f"✗ Discord update failed: {type(e).__name__}: {e}")
+            logger.error("✗ Discord update failed: %s: %s", type(e).__name__, self._redact(e))
             return False
     
     def clear_stream(self, platform_name: str) -> None:
@@ -478,18 +520,17 @@ class DiscordPlatform(SocialPlatform):
             embed["footer"] = {"text": f"Stream ended at {time.strftime('%H:%M:%S')} • Click for VOD"}
             
             # Keep role mention visible but don't ping again
-            content = ""
-            if platform_key in self.role_mentions:
-                role_id = self.role_mentions[platform_key]
-                content = f"<@&{role_id}>"
-            elif self.role_id:
-                content = f"<@&{self.role_id}>"
+            # The role is the one the original post appended (stored with the
+            # message), so the content and allowed_mentions stay in step.
+            role_id = msg_info.get('allowed_role')
+            content = f"<@&{role_id}>" if role_id else ""
             
             # Build update payload
             data: dict = {}
             if content:
                 data["content"] = content
             data["embeds"] = [embed]
+            data["allowed_mentions"] = _allowed_mentions(role_id)
             
             # PATCH the message via webhook
             edit_url = f"{webhook_url}/messages/{message_id}"
@@ -505,5 +546,5 @@ class DiscordPlatform(SocialPlatform):
                 return False
                 
         except Exception as e:
-            logger.error(f"✗ Discord stream ended update failed: {type(e).__name__}: {e}")
+            logger.error("✗ Discord stream ended update failed: %s: %s", type(e).__name__, self._redact(e))
             return False
