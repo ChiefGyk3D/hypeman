@@ -142,6 +142,12 @@ class TestFeaturesStayDisabled:
 
         cls = {'ANTHROPIC_API_KEY': ClaudeLLM, 'OPENAI_API_KEY': OpenAILLM,
                'GEMINI_API_KEY': GeminiLLM}[var]
+        # The anthropic and openai SDKs are absent on Python 3.9; the key check
+        # runs before any client is built, so mark the SDK present to reach it.
+        for module, flag in (('claude', 'CLAUDE_AVAILABLE'),
+                             ('openai_llm', 'OPENAI_AVAILABLE'),
+                             ('gemini', 'GEMINI_AVAILABLE')):
+            monkeypatch.setattr(f'hypeman_social.llm.{module}.{flag}', True)
         monkeypatch.setenv(var, SECRET_VALUE.lower())
         with caplog.at_level(logging.INFO):
             assert cls().authenticate() is False
