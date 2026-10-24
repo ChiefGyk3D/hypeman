@@ -23,19 +23,12 @@ from typing import Any, List, Optional, overload
 
 from dotenv import load_dotenv
 
+from hypeman_social.config.placeholders import is_placeholder
+
 logger = logging.getLogger(__name__)
 
 # Track whether we've already loaded a .env so repeat calls are cheap no-ops.
 _env_state = {'loaded': False}
-
-# Values starting with this prefix are template placeholders, not real config.
-_PLACEHOLDER_PREFIX = 'YOUR_'
-
-
-def _is_placeholder(value: Any) -> bool:
-    """True if the value is an unedited template placeholder like YOUR_API_KEY."""
-    return isinstance(value, str) and value.startswith(_PLACEHOLDER_PREFIX)
-
 
 def load_config(env_path: str = ".env") -> bool:
     """
@@ -88,7 +81,7 @@ def _doppler_lookup(*candidate_keys: str) -> Optional[str]:
 
         for candidate in candidate_keys:
             value = values.get(candidate)
-            if value and not _is_placeholder(value):
+            if value and not is_placeholder(value):
                 logger.debug(f"✓ Retrieved {candidate} from Doppler")
                 return value
     except Exception as e:

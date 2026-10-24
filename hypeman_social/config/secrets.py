@@ -19,9 +19,10 @@ import os
 import threading
 from typing import Any, Dict, Optional
 
+from hypeman_social.config.placeholders import is_placeholder
+
 logger = logging.getLogger(__name__)
 
-_PLACEHOLDER_PREFIX = 'YOUR_'
 
 # Doppler hands back every secret in a project/config in one call, but the old
 # code re-fetched that whole list for EVERY credential lookup. With ~20
@@ -102,7 +103,23 @@ def _doppler_secrets() -> Dict[str, Any]:
 
 def _usable(value: Any) -> bool:
     """True if the value is present and isn't an unedited template placeholder."""
-    return bool(value) and not (isinstance(value, str) and value.startswith(_PLACEHOLDER_PREFIX))
+    return not is_placeholder(value)
+
+
+def get_env_secret(name: str) -> Optional[str]:
+    """
+    Read a secret from one exact environment variable, placeholder-safe.
+
+    For the conventional unprefixed names (ANTHROPIC_API_KEY and friends).
+    An empty or template value reads as unset; the log names the variable and
+    never the value.
+    """
+    value = os.getenv(name)
+    if _usable(value):
+        return value
+    if value:
+        logger.warning(f"⚠ {name} is still set to a template placeholder — edit your .env")
+    return None
 
 
 def load_secrets_from_aws(secret_name: str) -> Dict[str, Any]:
@@ -224,6 +241,11 @@ def _lookup_in_bundle(bundle: Dict[str, Any], key: str, platform: str) -> Option
         value = bundle.get(candidate)
         if _usable(value):
             return value
+        if value:
+            logger.warning(
+                f"⚠ {platform.upper()}_{key.upper()} in the secrets manager is a "
+                f"template placeholder; treating it as unset"
+            )
 
     return None
 
@@ -317,8 +339,8 @@ def get_secret(
 
         if env_value:
             logger.warning(
-                f"⚠ {platform}.{key} is still set to a template placeholder "
-                f"(starts with '{_PLACEHOLDER_PREFIX}') — edit your .env"
+                f"⚠ {platform.upper()}_{key.upper()} is still set to a "
+                f"template placeholder; treating it as unset — edit your .env"
             )
 
         logger.debug(f"Secret not found: {platform}.{key}")

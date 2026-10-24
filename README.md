@@ -54,6 +54,25 @@ Extras: `bluesky`, `mastodon`, `ollama`, `gemini`, `aws`, `vault`, `doppler`, `a
 
 Discord, Matrix, and Threads need no extra — they're plain HTTP.
 
+## Required secrets
+
+A feature starts only with a real credential. An empty, unset or template
+value (`YOUR_...`, `changeme`, `<token>`, a webhook URL ending in
+`YOUR_WEBHOOK_TOKEN`) is treated as unset: the feature stays disabled, nothing
+is sent to the real service, and the log names the variable, never the value.
+The rule lives in one helper, `hypeman_social.config.is_placeholder`.
+
+| Secret | Needed for | Without it |
+|---|---|---|
+| `DISCORD_WEBHOOK_URL` | Discord posting | disabled |
+| `MATRIX_ACCESS_TOKEN` or `MATRIX_USERNAME` + `MATRIX_PASSWORD` | Matrix posting | disabled |
+| `BLUESKY_APP_PASSWORD`, `MASTODON_ACCESS_TOKEN`, `THREADS_ACCESS_TOKEN` | those networks | disabled |
+| `DISCORD_BOT_TOKEN`, `TWITCH_*` tokens | chat receiving | unavailable |
+| `LLM_CLAUDE_API_KEY`, `LLM_OPENAI_API_KEY`, `LLM_GEMINI_API_KEY` | cloud LLMs | provider disabled |
+
+Put them in the environment, Doppler, AWS Secrets Manager or Vault; the full
+rule and lookup order are in [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 ## Documentation
 
 The same docs are browsable as a site at

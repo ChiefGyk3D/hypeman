@@ -39,8 +39,8 @@ Priority, first match wins:
 4. The default passed by the caller.
 
 Empty strings count as unset — a blank line in `.env` never overrides a
-default. Values beginning with `YOUR_` are treated as unedited template
-placeholders and skipped.
+default. A value that Doppler returns and that matches the
+[placeholder rule](#required-secrets-and-the-placeholder-rule) is skipped.
 
 Booleans accept `true`, `1`, `yes`, `on`, `enabled` (case-insensitive);
 anything else is false. Unparseable ints/floats fall back to the default with
@@ -60,6 +60,45 @@ genuinely overrides a stale local `.env`:
 3. **HashiCorp Vault** (if `SECRETS_MANAGER=vault`)
 4. **Environment / `.env`** — `<PLATFORM>_<KEY>`, e.g. `BLUESKY_APP_PASSWORD`
 5. The default.
+
+### Required secrets and the placeholder rule
+
+The library never starts a feature on a missing or template credential. One
+helper, `hypeman_social.config.is_placeholder(value)`, defines the rule for
+every lookup (`get_secret`, `platform_secret`, `get_env_secret`, constructor
+credential overrides, and secrets-manager bundles). A value counts as unset
+when, case-insensitively and ignoring surrounding space, it is:
+
+- empty, or whitespace only;
+- wrapped in angle brackets, such as `<token>`;
+- exactly `example` or `placeholder`;
+- starting with `your_`, `your-`, `changeme`, `change_me`, `change-me`, `xxx`
+  or `dp.st.your`;
+- a URL (or other `/`, `?`, `=`, `:`, `@` separated value) with any segment
+  matching the above, so `https://discord.com/api/webhooks/1/YOUR_WEBHOOK_TOKEN`
+  is caught.
+
+A placeholder behaves exactly like an unset value: the feature stays disabled,
+no request goes to the real service, and the log names the variable (for
+example `DISCORD_WEBHOOK_URL`), never its value. Real values are returned
+unchanged.
+
+| Secret | Needed for | Without it | Where to put it |
+|---|---|---|---|
+| `DISCORD_WEBHOOK_URL` or `DISCORD_WEBHOOK_<PLATFORM>` | Discord posting | Discord posting stays disabled | env, Doppler, AWS, Vault |
+| `DISCORD_BOT_TOKEN` | Discord chat receiving | Chat adapter unavailable | same |
+| `MATRIX_ACCESS_TOKEN`, or `MATRIX_USERNAME` + `MATRIX_PASSWORD` | Matrix posting | Matrix stays disabled | same |
+| `BLUESKY_APP_PASSWORD` | Bluesky posting | Bluesky stays disabled | same |
+| `MASTODON_ACCESS_TOKEN` | Mastodon posting | Mastodon stays disabled | same |
+| `THREADS_ACCESS_TOKEN` | Threads posting | Threads stays disabled | same |
+| `TWITCH_CLIENT_ID`, `_ACCESS_TOKEN`, `_REFRESH_TOKEN`, `_CLIENT_SECRET` | Twitch chat | Chat unavailable, error names the key | same |
+| `LLM_CLAUDE_API_KEY` or `ANTHROPIC_API_KEY` | Claude provider | Provider disabled | same |
+| `LLM_OPENAI_API_KEY` or `OPENAI_API_KEY` | OpenAI provider | Provider disabled | same |
+| `LLM_GEMINI_API_KEY` or `GEMINI_API_KEY` | Gemini provider | Provider disabled | same |
+
+Only the features you enable need their secrets. The daemons built on this
+library inherit the rule; leave a variable empty rather than copying a sample
+value into it.
 
 `load_config(env_path=".env")` loads a `.env` file into the environment;
 call it once at startup (repeat calls are cheap no-ops).

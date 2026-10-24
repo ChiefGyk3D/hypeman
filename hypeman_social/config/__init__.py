@@ -12,7 +12,9 @@ from hypeman_social.config.config import (
     get_usernames,
     load_config,
 )
+from hypeman_social.config.placeholders import is_placeholder
 from hypeman_social.config.secrets import (
+    get_env_secret,
     get_secret,
     load_secrets_from_aws,
     load_secrets_from_doppler,
@@ -28,6 +30,8 @@ __all__ = [
     'get_usernames',
     'load_config',
     'get_secret',
+    'get_env_secret',
+    'is_placeholder',
     'load_secrets_from_aws',
     'load_secrets_from_vault',
     'load_secrets_from_doppler',

@@ -12,12 +12,11 @@ failover, which is the sensible compromise.
 """
 
 import logging
-import os
 import threading
 import time
 from typing import Any, Optional
 
-from hypeman_social.config import get_config, get_secret
+from hypeman_social.config import get_config, get_env_secret, get_secret
 from hypeman_social.llm.base import BaseLLM
 from hypeman_social.llm.profiles import GENERIC_PROFILE, ContentProfile
 
@@ -79,7 +78,7 @@ class GeminiLLM(BaseLLM):
 
             # GEMINI_API_KEY unprefixed is the common Doppler/CI convention.
             if not self.api_key:
-                self.api_key = os.getenv('GEMINI_API_KEY')
+                self.api_key = get_env_secret('GEMINI_API_KEY')
 
             if not self.api_key:
                 logger.error("✗ Gemini enabled but no API key found")

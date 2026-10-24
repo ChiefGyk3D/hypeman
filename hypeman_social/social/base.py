@@ -15,7 +15,7 @@ from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
-from hypeman_social.config import get_secret
+from hypeman_social.config import get_secret, is_placeholder
 
 logger = logging.getLogger(__name__)
 
@@ -232,7 +232,14 @@ class SocialPlatform(ABC):
         Falls back to the secret manager / env lookup when nothing was injected.
         """
         if key in self._credential_overrides:
-            return self._credential_overrides[key]
+            value = self._credential_overrides[key]
+            if is_placeholder(value):
+                logger.warning(
+                    f"⚠ {self.name} credential '{key}' passed to the constructor is "
+                    f"empty or a template placeholder; treating it as unset"
+                )
+                return default
+            return value
         return platform_secret(self.name, key, default)
 
     @abstractmethod

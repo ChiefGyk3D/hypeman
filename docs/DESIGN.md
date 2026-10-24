@@ -112,7 +112,8 @@ Plain settings and secrets deliberately resolve differently:
   `.env` file still carries. This ordering fixed a real bug that
   stream-daemon's own test suite had been flagging.
 
-Both chains treat empty strings and `YOUR_*` template placeholders as unset,
+Secret lookups treat empty strings and template placeholders (the one rule in
+`hypeman_social.config.placeholders`) as unset,
 and a secrets manager being unreachable degrades to env lookups instead of
 crashing.
 
