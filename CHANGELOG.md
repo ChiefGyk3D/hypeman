@@ -6,6 +6,11 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+### Security
+- **docs lock: certifi 2026.7.22 to 2026.10.23.** Fixes GHSA-6q48-6c7w-9gw2 in
+  `requirements/docs.txt`, regenerated with the pip-compile command in its
+  header, upgrading certifi only.
+
 ## [0.4.0] - 2026-10-25
 
 ### Security
