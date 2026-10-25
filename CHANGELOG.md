@@ -6,7 +6,20 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-25
+
 ### Security
+- **One placeholder rule for every secret lookup.** `is_placeholder()` (new
+  `hypeman_social.config.placeholders`) is case-insensitive and matches empty
+  values, `<...>`, `example` or `placeholder`, and the prefixes `your_`,
+  `your-`, `changeme`, `change_me`, `change-me`, `xxx` and `dp.st.your`, also
+  on each segment of a URL-shaped value. Env values, AWS and Vault bundles, the
+  `ANTHROPIC_API_KEY` / `OPENAI_API_KEY` / `GEMINI_API_KEY` fallbacks and
+  constructor overrides that match it are treated as unset, with a warning that
+  names the variable and never the value. Before, only an upper-case `YOUR_`
+  prefix was ignored, so a webhook such as `.../webhooks/1/YOUR_WEBHOOK_TOKEN`
+  or a lower-case `your_...` password reached the real service. Real values
+  behave as before.
 - **Discord: the webhook token no longer reaches the logs.** The three error
   handlers in `post`, `update_stream` and `end_stream` log the exception text,
   and a `requests` error carries the full webhook URL. That text now has any
