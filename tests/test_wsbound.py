@@ -293,10 +293,26 @@ def test_a_real_3xx_handshake_is_rejected_whichever_websocket_client_is_installe
     thread.start()
     try:
         cls, _ = _wsbound.make_bounded_websocket(websocket, TooBig, LIMIT)
-        with pytest.raises(Exception):
-            _wsbound.open_upgraded(
+        class NotUpgrade(Exception):
+            """Unique to this test, so only the status check can raise it."""
+
+        def connect():
+            return _wsbound.open_upgraded(
                 websocket, f'ws://127.0.0.1:{server.server_address[1]}/', cls,
-                OSError, timeout=2)
+                NotUpgrade, timeout=2, http_no_proxy=['127.0.0.1', 'localhost'])
+
+        version = tuple(int(p) for p in websocket.__version__.split('.')[:3] if p.isdigit())
+        if version >= (1, 9, 2):
+            # create_connection itself refuses the 3xx at redirect_limit=0, before the
+            # getstatus() check runs. This branch covers redirect_limit=0 only; the
+            # post-connect check is proven by the stub tests and by the 1.9.0 branch.
+            with pytest.raises(websocket.WebSocketException, match='Redirect limit exhausted'):
+                connect()
+        else:
+            # 1.9.0 and 1.8.x hand back the connected socket after the 3xx, so the
+            # failure must come from the getstatus() != 101 check.
+            with pytest.raises(NotUpgrade, match='handshake was not an upgrade'):
+                connect()
     finally:
         server.shutdown()
         server.server_close()
