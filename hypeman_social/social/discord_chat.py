@@ -44,8 +44,6 @@ import math
 import random
 import re
 import secrets
-import socket
-import struct
 import sys
 import threading
 import time
@@ -55,6 +53,7 @@ from urllib.parse import urlsplit
 
 import requests
 
+from hypeman_social.social import _wsbound
 from hypeman_social.social.base import platform_secret
 from hypeman_social.social.events import (
     ROLE_BROADCASTER,
@@ -200,55 +199,11 @@ class MessageTooLarge(Exception):
     """An inbound frame or message exceeded the configured event size."""
 
 
-def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
-    """(class, None) for a websocket-client WebSocket that refuses oversize frames
-    up front, or (None, reason) when this websocket-client cannot support it.
-
-    The stock reader trusts the length in a frame header and allocates for it
-    (and for every fragment of a message) before any size check can run. The
-    subclass checks the declared length straight after the header is read, so a
-    frame or an aggregate over the limit is refused before its payload is
-    received. This leans on websocket-client internals, so there is no fallback
-    to the stock reader: ``_reader_error`` probes the hook and the adapter
-    reports itself unavailable when it does not work. The same subclass makes the
-    close acknowledgement the library sends by itself follow ``resumable``
-    (Discord keeps a session only if the close status is not 1000 or 1001).
-    """
-    if websocket is None:
-        return None, 'websocket-client is not installed'
-    try:
-        from websocket._abnf import ABNF, frame_buffer
-    except ImportError:
-        return None, 'websocket._abnf.frame_buffer cannot be imported'
-    for attribute in ('recv_length', 'recv_frame'):
-        if not callable(getattr(frame_buffer, attribute, None)):
-            return None, f'frame_buffer.{attribute} is missing'
-
-    class _BoundedFrameBuffer(frame_buffer):
-        def __init__(self, *args: Any, limit: int = MAX_MESSAGE_BYTES, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            self.limit = limit
-            self._message_bytes = 0
-
-        def recv_length(self) -> None:
-            super().recv_length()
-            header: Any = self.header
-            length: Any = self.length
-            if header is None or not isinstance(length, int) or isinstance(length, bool):
-                raise MessageTooLarge('frame length is unreadable')  # fail closed
-            earlier = self._message_bytes if header[4] == ABNF.OPCODE_CONT else 0
-            if length + earlier > self.limit:
-                raise MessageTooLarge('frame over the size limit')
-
-        def recv_frame(self) -> Any:
-            frame = super().recv_frame()
-            if frame.opcode in (ABNF.OPCODE_TEXT, ABNF.OPCODE_BINARY):
-                self._message_bytes = 0 if frame.fin else len(frame.data)
-            elif frame.opcode == ABNF.OPCODE_CONT:
-                self._message_bytes = 0 if frame.fin else self._message_bytes + len(frame.data)
-            return frame
-
-    class _BoundedWebSocket(websocket.WebSocket):
+def _extend_websocket(base: Any) -> Any:
+    """Make the close acknowledgement the library sends by itself follow
+    ``resumable`` (Discord keeps a session only if the close status is not 1000
+    or 1001)."""
+    class _DiscordWebSocket(base):
         #: Set by the session before each read: whether a received close should
         #: be acknowledged in a way that keeps the session.
         resumable = False
@@ -256,19 +211,19 @@ def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
         #: wins over the flag cached before it.
         stop_event: Any = None
 
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            limit = kwargs.pop('max_bytes', MAX_MESSAGE_BYTES)
-            super().__init__(*args, **kwargs)
-            self.frame_buffer = _BoundedFrameBuffer(
-                self._recv, bool(kwargs.get('skip_utf8_validation', False)), limit=limit)
-
         def send_close(self, status: int = ORDERLY_CLOSE_CODE, reason: Any = b'') -> None:
             stopping = self.stop_event is not None and self.stop_event.is_set()
             if status == ORDERLY_CLOSE_CODE and self.resumable and not stopping:
                 status = RESUMABLE_CLOSE_CODE
             super().send_close(status, reason)
 
-    return _BoundedWebSocket, None
+    return _DiscordWebSocket
+
+
+def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
+    """(class, None) for a size-bounded WebSocket, or (None, reason); see _wsbound."""
+    return _wsbound.make_bounded_websocket(
+        websocket, MessageTooLarge, MAX_MESSAGE_BYTES, extend=_extend_websocket)
 
 
 _BoundedWebSocket, _BOUNDED_ERROR = _make_bounded_websocket()
@@ -276,40 +231,7 @@ _reader_cache: Optional[Tuple[Optional[str]]] = None
 
 
 def _probe_reader(cls: Any) -> Optional[str]:
-    """Prove, on in-process socket pairs, that ``cls`` refuses a frame whose header
-    declares more than its limit before the payload arrives (only a few payload
-    bytes are ever sent, so a trusting reader times out), refuses a fragmented
-    message whose total passes the limit, and still reads an ordinary frame.
-    Returns a reason on failure, None on success."""
-    def read(raw: bytes, expect: Optional[type]) -> Optional[str]:
-        reader, writer = socket.socketpair()
-        reader.settimeout(0.5)
-        try:
-            ws = cls(max_bytes=100)
-            ws.sock = reader
-            ws.connected = True
-            writer.sendall(raw)
-            try:
-                got = ws.recv()
-            except Exception as exc:
-                return None if expect and isinstance(exc, expect) else type(exc).__name__
-            return 'accepted' if expect else ('ok' if got == 'hello' else 'misread')
-        finally:
-            reader.close()
-            writer.close()
-
-    try:
-        huge = struct.pack('!BBQ', 0x81, 127, 1 << 40) + b'x' * 8
-        split = struct.pack('!BB', 0x01, 60) + b'a' * 60 + struct.pack('!BB', 0x80, 60) + b'b' * 8
-        if read(huge, MessageTooLarge) is not None:
-            return 'an oversize frame was not refused before its payload was read'
-        if read(split, MessageTooLarge) is not None:
-            return 'a fragmented message over the limit was not refused'
-        if read(struct.pack('!BB', 0x81, 5) + b'hello', None) != 'ok':
-            return 'an ordinary frame was not read correctly'
-    except Exception:
-        return 'the compatibility probe itself failed'
-    return None
+    return _wsbound.probe_reader(cls, MessageTooLarge)
 
 
 def _reader_error() -> Optional[str]:
@@ -317,14 +239,11 @@ def _reader_error() -> Optional[str]:
     naming the installed websocket-client. Computed once per process."""
     global _reader_cache
     if _reader_cache is None:
-        version = getattr(websocket, '__version__', 'unknown') if websocket else 'not installed'
         reason = _BOUNDED_ERROR or 'no bounded reader'
         if _BoundedWebSocket is not None:
             reason = _probe_reader(_BoundedWebSocket) or ''
         if reason:
-            reason = (f'Discord chat disabled: websocket-client {version} cannot provide the '
-                      f'size-bounded reader this adapter requires ({reason}). Install a tested '
-                      f'version: pip install "websocket-client>=1.6.0,<2"')
+            reason = _wsbound.reader_failure_message('Discord', websocket, reason)
         _reader_cache = (reason or None,)
     return _reader_cache[0]
 
@@ -566,17 +485,12 @@ class DiscordChat(ChatReceiver):
         # Never fall back to the stock reader: it checks sizes after allocating.
         if _reader_error() is not None:
             raise OSError('the size-bounded websocket reader is unavailable')
-        # redirect_limit=0: a handshake redirect would carry the next frame
-        # (Identify or Resume, with the token) to a host nobody checked.
-        ws = websocket.create_connection(
-            url, timeout=POLL_SECONDS, redirect_limit=0, class_=_BoundedWebSocket,
-            max_bytes=self._active.max_event_bytes)
-        # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
-        # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
-        if ws.getstatus() != 101:
-            ws.close()
-            raise websocket.WebSocketException('Gateway handshake was not an upgrade')
-        return ws
+        # A handshake redirect would carry the next frame (Identify or Resume,
+        # with the token) to a host nobody checked; open_upgraded refuses it.
+        return _wsbound.open_upgraded(
+            websocket, url, _BoundedWebSocket,
+            lambda _msg: websocket.WebSocketException('Gateway handshake was not an upgrade'),
+            timeout=POLL_SECONDS, max_bytes=self._active.max_event_bytes)
 
     def _wait(self, seconds: float) -> bool:
         """Sleep between connection attempts; True if asked to stop meanwhile."""

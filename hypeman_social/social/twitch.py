@@ -34,8 +34,6 @@ import collections
 import json
 import logging
 import re
-import socket
-import struct
 import threading
 import time
 import unicodedata
@@ -47,6 +45,7 @@ from urllib.parse import urlparse
 import requests
 
 from hypeman_social.config.secrets import reset_secret_cache
+from hypeman_social.social import _wsbound
 from hypeman_social.social.base import platform_secret
 from hypeman_social.social.events import (
     ROLE_BROADCASTER,
@@ -181,56 +180,8 @@ def _is_timeout(exc: BaseException) -> bool:
 
 
 def _make_bounded_websocket() -> Tuple[Any, Optional[str]]:
-    """(class, None) for a websocket-client WebSocket that refuses oversize frames
-    up front, or (None, reason) when this websocket-client cannot support it.
-
-    The stock reader trusts the length in a frame header and allocates for it
-    (and for every fragment of a message) before any size check can run. The
-    subclass checks the declared length straight after the header is read, so a
-    frame or an aggregate over MAX_FRAME_BYTES is refused before its payload is
-    received. websocket-client has no per-message limit option of its own, so
-    this leans on its ``frame_buffer`` internals. There is no fallback to the
-    stock reader: the adapter reports itself unavailable instead (see
-    ``_reader_error``), and ``_probe_reader`` proves the hook works.
-    """
-    if websocket is None:
-        return None, 'websocket-client is not installed'
-    try:
-        from websocket._abnf import ABNF, frame_buffer
-    except ImportError:
-        return None, 'websocket._abnf.frame_buffer cannot be imported'
-    for attribute in ('recv_length', 'recv_frame'):
-        if not callable(getattr(frame_buffer, attribute, None)):
-            return None, f'frame_buffer.{attribute} is missing'
-
-    class _BoundedFrameBuffer(frame_buffer):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            self._message_bytes = 0
-
-        def recv_length(self) -> None:
-            super().recv_length()
-            header: Any = self.header
-            opcode = header[4]  # (fin, rsv1, rsv2, rsv3, opcode, mask, length)
-            earlier = self._message_bytes if opcode == ABNF.OPCODE_CONT else 0
-            if (self.length or 0) + earlier > MAX_FRAME_BYTES:
-                raise FrameTooLarge('frame over the size limit')
-
-        def recv_frame(self) -> Any:
-            frame = super().recv_frame()
-            if frame.opcode in (ABNF.OPCODE_TEXT, ABNF.OPCODE_BINARY):
-                self._message_bytes = 0 if frame.fin else len(frame.data)
-            elif frame.opcode == ABNF.OPCODE_CONT:
-                self._message_bytes = 0 if frame.fin else self._message_bytes + len(frame.data)
-            return frame
-
-    class _BoundedWebSocket(websocket.WebSocket):
-        def __init__(self, *args: Any, **kwargs: Any) -> None:
-            super().__init__(*args, **kwargs)
-            self.frame_buffer = _BoundedFrameBuffer(
-                self._recv, bool(kwargs.get('skip_utf8_validation', False)))
-
-    return _BoundedWebSocket, None
+    """(class, None) for a size-bounded WebSocket, or (None, reason); see _wsbound."""
+    return _wsbound.make_bounded_websocket(websocket, FrameTooLarge, MAX_FRAME_BYTES)
 
 
 _BoundedWebSocket, _BOUNDED_ERROR = _make_bounded_websocket()
@@ -238,44 +189,7 @@ _reader_cache: Optional[Tuple[Optional[str]]] = None
 
 
 def _probe_reader(cls: Any) -> Optional[str]:
-    """Prove, on an in-process socket pair, that ``cls`` refuses a frame whose
-    header declares more than MAX_FRAME_BYTES before its payload arrives (only
-    eight payload bytes are ever sent, so a trusting reader times out), and that
-    an ordinary frame still reads. Returns a reason on failure, None on success."""
-    def pair() -> Tuple[Any, Any, Any]:
-        reader, writer = socket.socketpair()
-        reader.settimeout(0.5)
-        ws = cls()
-        ws.sock = reader
-        ws.connected = True
-        return ws, reader, writer
-
-    try:
-        ws, reader, writer = pair()
-        try:
-            writer.sendall(struct.pack('!BBQ', 0x81, 127, MAX_FRAME_BYTES + 1) + b'x' * 8)
-            try:
-                ws.recv()
-            except FrameTooLarge:
-                pass
-            except Exception:
-                return 'an oversize frame was not refused before its payload was read'
-            else:
-                return 'an oversize frame was accepted'
-        finally:
-            reader.close()
-            writer.close()
-        ws, reader, writer = pair()
-        try:
-            writer.sendall(struct.pack('!BB', 0x81, 5) + b'hello')
-            if ws.recv() != 'hello':
-                return 'an ordinary frame was not read correctly'
-        finally:
-            reader.close()
-            writer.close()
-    except Exception:
-        return 'the compatibility probe itself failed'
-    return None
+    return _wsbound.probe_reader(cls, FrameTooLarge)
 
 
 def _reader_error() -> Optional[str]:
@@ -283,16 +197,13 @@ def _reader_error() -> Optional[str]:
     naming the installed websocket-client. Computed once per process."""
     global _reader_cache
     if _reader_cache is None:
-        version = getattr(websocket, '__version__', 'unknown') if websocket else 'not installed'
         reason: Optional[str] = None
         if _BoundedWebSocket is None:
             reason = _BOUNDED_ERROR or 'no bounded reader'
         else:
             reason = _probe_reader(_BoundedWebSocket)
         if reason:
-            reason = (f'Twitch chat disabled: websocket-client {version} cannot provide the '
-                      f'size-bounded reader this adapter requires ({reason}). Install a tested '
-                      f'version: pip install "websocket-client>=1.6.0,<2"')
+            reason = _wsbound.reader_failure_message('Twitch', websocket, reason)
         _reader_cache = (reason,)
     return _reader_cache[0]
 
@@ -301,25 +212,9 @@ def _default_connect(url: str, timeout: float) -> Any:
     # Never fall back to the stock reader: it checks sizes after allocating.
     if _reader_error() is not None:
         raise OSError('the size-bounded websocket reader is unavailable')
-    # redirect_limit=0: websocket-client would otherwise follow a 3xx from the
-    # handshake to any host, past every URL check made before connecting.
-    ws = websocket.create_connection(url, timeout=timeout, redirect_limit=0,
-                                     class_=_BoundedWebSocket)
-    handed_over = False
-    try:
-        # websocket-client 1.9.0 marks a socket connected after a 3xx handshake
-        # reply when redirect_limit is 0 (1.9.2 raises); accept only a real upgrade.
-        if ws.getstatus() != 101:
-            raise OSError('EventSub handshake was not an upgrade')
-        handed_over = True
-        return ws
-    finally:
-        if not handed_over:
-            try:
-                ws.close()
-            except Exception:
-                # Nothing more to do: the caller gets the original failure.
-                pass
+    return _wsbound.open_upgraded(
+        websocket, url, _BoundedWebSocket,
+        lambda _msg: OSError('EventSub handshake was not an upgrade'), timeout=timeout)
 
 
 def _parse_timestamp(value: Any) -> Optional[float]:

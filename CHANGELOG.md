@@ -6,6 +6,13 @@ All notable changes to hypeman-social. The format follows
 
 ## [Unreleased]
 
+### Changed
+- **One bounded-websocket module for the chat adapters.** The size-bounded reader, its
+  socketpair startup probe and the 101 upgrade check now live in
+  `hypeman_social.social._wsbound`; the Twitch and Discord adapters use it, so a fix reaches
+  both. No behavior change intended; the Twitch reader now also fails closed on an unreadable
+  frame length, as Discord's already did (#101).
+
 ### Security
 - **docs lock: certifi 2026.7.22 to 2026.10.23.** Fixes GHSA-6q48-6c7w-9gw2 in
   `requirements/docs.txt`, regenerated with the pip-compile command in its
