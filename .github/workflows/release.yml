@@ -19,7 +19,7 @@ permissions:
 
 jobs:
   package:
-    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@0fc2df49cf51608a2f8b4b8eeb51d86d4d4cfaba # v1.27.0
+    uses: ChiefGyk3D/git-your-ship-together/.github/workflows/python-package-release.yml@7501cb3fa19d83d0e0a131cb040e7c4da32a9504 # v1.28.0
     permissions:
       contents: write      # attach the files to the GitHub release
       id-token: write      # PyPI Trusted Publishing and build provenance
@@ -43,7 +43,7 @@ jobs:
       contents: read
       id-token: write      # PyPI Trusted Publishing
     steps:
-      - uses: step-security/harden-runner@dc2769abcc0fcfbadfc1df54081c1608579ef6b2 # v2.22.2
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
         with:
           egress-policy: block
           allowed-endpoints: api.github.com:443 files.pythonhosted.org:443 fulcio.sigstore.dev:443 ghcr.io:443 github.com:443 pkg-containers.githubusercontent.com:443 productionresultssa12.blob.core.windows.net:443 pypi.org:443 rekor.sigstore.dev:443 release-assets.githubusercontent.com:443 timestamp.sigstore.dev:443 tuf-repo-cdn.sigstore.dev:443 upload.pypi.org:443 uploads.github.com:443
