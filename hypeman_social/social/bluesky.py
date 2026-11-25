@@ -8,7 +8,7 @@ Bluesky social platform implementation with threading and rich embed support.
 
 import logging
 import re
-from typing import Optional
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 from hypeman_social.config import get_bool_config, get_config
@@ -22,10 +22,17 @@ from hypeman_social.social.base import (
 # atproto is the 'bluesky' extra. Importing this module without it must not
 # raise — the daemon may only have the extras for the networks it uses.
 try:
-    from atproto import Client, client_utils, models
+    from atproto import Client as _Client
+    from atproto import client_utils as _client_utils
+    from atproto import models as _models
+    # Typed Any so the fallback below can bind None without mypy treating the
+    # names as classes and modules.
+    Client: Any = _Client
+    client_utils: Any = _client_utils
+    models: Any = _models
     ATPROTO_AVAILABLE = True
 except ImportError:
-    Client = models = client_utils = None  # type: ignore[assignment]
+    Client = models = client_utils = None
     ATPROTO_AVAILABLE = False
 
 logger = logging.getLogger(__name__)
@@ -386,8 +393,8 @@ class BlueskyPlatform(SocialPlatform):
                         if not og_image:
                             og_image = soup.find('meta', attrs={'name': 'twitter:image'})
                         
-                        title = og_title['content'] if og_title and og_title.get('content') else first_url
-                        description = og_description['content'] if og_description and og_description.get('content') else ''
+                        title = str(og_title['content']) if og_title and og_title.get('content') else first_url
+                        description = str(og_description['content']) if og_description and og_description.get('content') else ''
                         image_url = str(og_image['content']) if og_image and og_image.get('content') else None
                         
                         # Upload image to Bluesky if available
