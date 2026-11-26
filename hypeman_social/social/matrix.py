@@ -9,6 +9,7 @@ NOTE: Matrix does NOT support editing messages like Discord.
 Messages are posted once and cannot be updated with live viewer counts.
 """
 
+import atexit
 import logging
 import re
 from typing import Optional
@@ -45,6 +46,8 @@ class MatrixPlatform(SocialPlatform):
         self.room_id = None
         self.username = None
         self.password = None
+        self.device_id = None
+        self._session_login = False
         
     def authenticate(self):
         if not get_bool_config('Matrix', 'enable_posting', default=False):
@@ -63,29 +66,31 @@ class MatrixPlatform(SocialPlatform):
         if not self.homeserver.startswith('http'):
             self.homeserver = f"https://{self.homeserver}"
         
-        # Check for username/password first (preferred for bot accounts with auto-rotation)
-        self.username = platform_secret('Matrix', 'username')
-        self.password = platform_secret('Matrix', 'password')
-        
-        # Priority: Username/Password > Access Token
-        # If both are set, username/password takes precedence for automatic token rotation
-        if self.username and self.password:
-            # Login to get fresh access token
-            logger.info("Using username/password authentication (auto-rotation enabled)")
+        # Priority: a static access token wins. Username/password login is a
+        # fallback used only when no token is set; the session it creates is
+        # kept in memory for this process and logged out on close().
+        static_token = platform_secret('Matrix', 'access_token')
+        if static_token:
+            logger.info("Using static access token authentication")
+            self.access_token = static_token
+            self._session_login = False
+        elif self._session_login and self.access_token:
+            logger.debug("Reusing Matrix session from earlier login")
+        else:
+            self.username = platform_secret('Matrix', 'username')
+            self.password = platform_secret('Matrix', 'password')
+            if not (self.username and self.password):
+                logger.error("✗ Matrix authentication failed - need either access_token OR username+password")
+                return False
+            logger.info("Using username/password authentication (fallback; prefer MATRIX_ACCESS_TOKEN)")
             self.access_token = self._login_and_get_token()
             if not self.access_token:
                 logger.error("✗ Matrix login failed - check username/password")
                 return False
+            self._session_login = True
+            atexit.register(self.close)
             logger.info("✓ Matrix logged in and obtained access token")
-        else:
-            # Fall back to static access token
-            logger.info("Using static access token authentication")
-            self.access_token = platform_secret('Matrix', 'access_token')
-            
-            if not self.access_token:
-                logger.error("✗ Matrix authentication failed - need either access_token OR username+password")
-                return False
-        
+
         self.enabled = True
         self.authenticated = True
         logger.info("✓ Matrix authenticated")
@@ -116,6 +121,7 @@ class MatrixPlatform(SocialPlatform):
             if response.status_code == 200:
                 data = response.json()
                 access_token = data.get('access_token')
+                self.device_id = data.get('device_id')
                 if access_token:
                     logger.info("✓ Obtained Matrix access token")
                     return access_token
@@ -126,8 +132,38 @@ class MatrixPlatform(SocialPlatform):
             
             return None
         except Exception as e:
-            logger.error(f"✗ Matrix login error: {type(e).__name__}: {e}")
+            # Type only: the exception text must never carry request data.
+            logger.error(f"✗ Matrix login error: {type(e).__name__}")
             return None
+
+    def close(self):
+        """Log out a session this process created, so no device is left behind.
+
+        A static MATRIX_ACCESS_TOKEN is never logged out. Safe to call twice.
+        """
+        if not self._session_login:
+            return
+        token, self.access_token = self.access_token, None
+        self._session_login = False
+        self.authenticated = False
+        self.enabled = False
+        self.device_id = None
+        atexit.unregister(self.close)
+        if not token:
+            return
+        try:
+            response = requests.post(
+                f"{self.homeserver}/_matrix/client/v3/logout",
+                json={},
+                headers={"Authorization": f"Bearer {token}"},
+                timeout=10,
+            )
+            if response.status_code == 200:
+                logger.info("✓ Matrix session logged out")
+            else:
+                logger.warning(f"⚠ Matrix logout failed with status {response.status_code}")
+        except Exception as e:
+            logger.warning(f"⚠ Matrix logout error: {type(e).__name__}")
     
     def post(self, message: str, reply_to_id: Optional[str] = None, platform_name: Optional[str] = None, stream_data: Optional[dict] = None) -> Optional[str]:
         if not self.enabled:

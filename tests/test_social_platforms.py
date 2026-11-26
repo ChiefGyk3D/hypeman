@@ -281,6 +281,9 @@ class TestDiscord:
 
 @pytest.fixture
 def matrix_env(monkeypatch):
+    # Never register a real exit hook from tests.
+    monkeypatch.setattr('hypeman_social.social.matrix.atexit.register', lambda *a, **k: None)
+    monkeypatch.setattr('hypeman_social.social.matrix.atexit.unregister', lambda *a, **k: None)
     monkeypatch.setenv('MATRIX_ENABLE_POSTING', 'true')
     monkeypatch.setenv('MATRIX_HOMESERVER', 'https://matrix.example')
     monkeypatch.setenv('MATRIX_ROOM_ID', '!room:matrix.example')
@@ -299,24 +302,97 @@ class TestMatrix:
         monkeypatch.delenv('MATRIX_ACCESS_TOKEN', raising=False)
         assert MatrixPlatform().authenticate() is False
 
-    def test_password_login_wins_over_token(self, matrix_env, monkeypatch):
-        monkeypatch.setenv('MATRIX_ACCESS_TOKEN', 'stale')
+    def test_token_wins_over_password(self, matrix_env, monkeypatch):
+        monkeypatch.setenv('MATRIX_ACCESS_TOKEN', 'static-tok')
         monkeypatch.setenv('MATRIX_USERNAME', '@bot:matrix.example')
         monkeypatch.setenv('MATRIX_PASSWORD', 'hunter2')
+        calls = []
+        monkeypatch.setattr('hypeman_social.social.matrix.requests.post',
+                            lambda *a, **k: calls.append((a, k)) or FakeResponse(200, {'access_token': 'x'}))
+        platform = MatrixPlatform()
+        assert platform.authenticate() is True
+        assert platform.access_token == 'static-tok'
+        assert calls == []  # no login happened
 
-        captured = {}
+    def test_password_only_logs_in_once_and_reuses(self, matrix_env, monkeypatch):
+        monkeypatch.delenv('MATRIX_ACCESS_TOKEN', raising=False)
+        monkeypatch.setenv('MATRIX_USERNAME', '@bot:matrix.example')
+        monkeypatch.setenv('MATRIX_PASSWORD', 'hunter2')
+        captured = []
 
-        def fake_post(url, json=None, timeout=None, headers=None):
-            captured['url'] = url
-            captured['json'] = json
-            return FakeResponse(200, {'access_token': 'fresh'})
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.append((url, json))
+            return FakeResponse(200, {'access_token': 'fresh', 'device_id': 'DEV1'})
 
         monkeypatch.setattr('hypeman_social.social.matrix.requests.post', fake_post)
         platform = MatrixPlatform()
         assert platform.authenticate() is True
+        assert platform.authenticate() is True
+        logins = [c for c in captured if c[0].endswith('/login')]
+        assert len(logins) == 1
         assert platform.access_token == 'fresh'
+        assert platform.device_id == 'DEV1'
         # MXID must be reduced to the localpart for the login call.
-        assert captured['json']['identifier']['user'] == 'bot'
+        assert logins[0][1]['identifier']['user'] == 'bot'
+
+    def test_close_logs_out_password_session(self, matrix_env, monkeypatch):
+        monkeypatch.delenv('MATRIX_ACCESS_TOKEN', raising=False)
+        monkeypatch.setenv('MATRIX_USERNAME', 'bot')
+        monkeypatch.setenv('MATRIX_PASSWORD', 'hunter2')
+        captured = []
+
+        def fake_post(url, json=None, headers=None, timeout=None):
+            captured.append((url, headers))
+            return FakeResponse(200, {'access_token': 'fresh', 'device_id': 'DEV1'})
+
+        monkeypatch.setattr('hypeman_social.social.matrix.requests.post', fake_post)
+        platform = MatrixPlatform()
+        platform.authenticate()
+        platform.close()
+        platform.close()  # idempotent
+        logouts = [c for c in captured if c[0].endswith('/_matrix/client/v3/logout')]
+        assert len(logouts) == 1
+        assert logouts[0][1]['Authorization'] == 'Bearer fresh'
+        assert platform.access_token is None
+
+    def test_close_never_logs_out_static_token(self, matrix_env, monkeypatch):
+        monkeypatch.setenv('MATRIX_ACCESS_TOKEN', 'static-tok')
+        calls = []
+        monkeypatch.setattr('hypeman_social.social.matrix.requests.post',
+                            lambda *a, **k: calls.append(a) or FakeResponse(200))
+        platform = MatrixPlatform()
+        platform.authenticate()
+        platform.close()
+        assert calls == []
+
+    def test_secrets_never_logged(self, matrix_env, monkeypatch, caplog):
+        import logging
+        monkeypatch.delenv('MATRIX_ACCESS_TOKEN', raising=False)
+        monkeypatch.setenv('MATRIX_USERNAME', 'bot')
+        monkeypatch.setenv('MATRIX_PASSWORD', 'hunter2-secret')
+        monkeypatch.setattr('hypeman_social.social.matrix.requests.post',
+                            lambda *a, **k: FakeResponse(200, {'access_token': 'tok-secret-xyz', 'device_id': 'D'}))
+        with caplog.at_level(logging.DEBUG):
+            platform = MatrixPlatform()
+            platform.authenticate()
+            platform.post('hello')
+            platform.close()
+        assert 'hunter2-secret' not in caplog.text
+        assert 'tok-secret-xyz' not in caplog.text
+
+    def test_login_error_does_not_log_secrets(self, matrix_env, monkeypatch, caplog):
+        import logging
+        monkeypatch.delenv('MATRIX_ACCESS_TOKEN', raising=False)
+        monkeypatch.setenv('MATRIX_USERNAME', 'bot')
+        monkeypatch.setenv('MATRIX_PASSWORD', 'hunter2-secret')
+
+        def boom(*a, **k):
+            raise RuntimeError(f"failed with {k.get('json')}")
+
+        monkeypatch.setattr('hypeman_social.social.matrix.requests.post', boom)
+        with caplog.at_level(logging.DEBUG):
+            assert MatrixPlatform().authenticate() is False
+        assert 'hunter2-secret' not in caplog.text
 
     def test_post_builds_html_and_returns_event_id(self, matrix_env, monkeypatch):
         monkeypatch.setenv('MATRIX_ACCESS_TOKEN', 'tok')
