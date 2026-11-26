@@ -7,6 +7,7 @@ All notable changes to hypeman-social. The format follows
 ## [Unreleased]
 
 ### Changed
+- **Matrix authentication hardening (#144).** `MATRIX_ACCESS_TOKEN` is now preferred whenever set; username/password login is a fallback that logs in once per process, reuses the session and logs out on `close()` or exit. See `docs/MATRIX_TOKEN_MIGRATION.md`.
 - **One bounded-websocket module for the chat adapters.** The size-bounded reader, its
   socketpair startup probe and the 101 upgrade check now live in
   `hypeman_social.social._wsbound`; the Twitch and Discord adapters use it, so a fix reaches

@@ -65,7 +65,7 @@ The rule lives in one helper, `hypeman_social.config.is_placeholder`.
 | Secret | Needed for | Without it |
 |---|---|---|
 | `DISCORD_WEBHOOK_URL` | Discord posting | disabled |
-| `MATRIX_ACCESS_TOKEN` or `MATRIX_USERNAME` + `MATRIX_PASSWORD` | Matrix posting | disabled |
+| `MATRIX_ACCESS_TOKEN` (preferred) or `MATRIX_USERNAME` + `MATRIX_PASSWORD` (fallback) | Matrix posting | disabled |
 | `BLUESKY_APP_PASSWORD`, `MASTODON_ACCESS_TOKEN`, `THREADS_ACCESS_TOKEN` | those networks | disabled |
 | `DISCORD_BOT_TOKEN`, `TWITCH_*` tokens | chat receiving | unavailable |
 | `LLM_CLAUDE_API_KEY`, `LLM_OPENAI_API_KEY`, `LLM_GEMINI_API_KEY` | cloud LLMs | provider disabled |

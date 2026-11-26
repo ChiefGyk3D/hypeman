@@ -432,12 +432,13 @@ No extra needed — client-server HTTP API via requests.
 | `MATRIX_ENABLE_POSTING` | Enable the platform | `false` |
 | `MATRIX_HOMESERVER` | Homeserver URL; `https://` assumed | — |
 | `MATRIX_ROOM_ID` | Target room, e.g. `!abc123:matrix.org` | — |
-| `MATRIX_USERNAME` + `MATRIX_PASSWORD` | Bot login — **preferred**: a fresh access token per start, tokens rotate automatically | — |
-| `MATRIX_ACCESS_TOKEN` | Static token — used only when username/password are absent | — |
+| `MATRIX_ACCESS_TOKEN` | Access token for a dedicated bot account — **preferred**, and used whenever it is set | — |
+| `MATRIX_USERNAME` + `MATRIX_PASSWORD` | Fallback login, used only when no token is set. One login per process; the session is reused and logged out on `close()` / exit | — |
 
 Behavior: HTML-formatted messages with clickable links and per-source
 headers; replies use `m.in_reply_to`. Matrix cannot edit messages, so no
-live viewer-count updates.
+live viewer-count updates. To move a consumer off the password, see
+[Matrix: password to token](MATRIX_TOKEN_MIGRATION.md).
 
 ## Social: Threads
 
@@ -529,8 +530,7 @@ DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
 MATRIX_ENABLE_POSTING=true
 MATRIX_HOMESERVER=https://matrix.org
 MATRIX_ROOM_ID=!room:matrix.org
-MATRIX_USERNAME=@bot:matrix.org
-MATRIX_PASSWORD=...
+MATRIX_ACCESS_TOKEN=...
 ```
 
 ### Fully local, nothing leaves the network
