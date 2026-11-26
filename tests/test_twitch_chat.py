@@ -1557,15 +1557,50 @@ def test_blocked_callback_never_blocks_and_the_latest_pair_arrives(http, clock):
 
     chat = refreshing(http, clock, callback)
     assert chat.is_available() is True
-    for _ in range(3):
-        assert run_in_thread(lambda: chat._ensure_auth(force=True))  # never waits for the callback
+    assert run_in_thread(lambda: chat._ensure_auth(force=True))  # never waits for the callback
+    # The dispatcher thread starts asynchronously: wait until it has taken the
+    # first pair, or the second refresh can overwrite the slot before it does.
     assert entered.wait(3) and seen == []
+    for _ in range(2):
+        assert run_in_thread(lambda: chat._ensure_auth(force=True))
     clock.now += 2
     assert run_in_thread(lambda: chat.send('111', 'hi'))  # the auth lock is free
     gate.set()
     assert wait_for(lambda: len(seen) == 2)
     # The first pair was already in flight; the second was overwritten by the third.
     assert seen == [('A1', 'R1'), ('A3', 'R3')]
+    chat.stop()
+    assert chat.stopped_cleanly is True
+
+
+def test_a_late_dispatcher_start_keeps_only_the_newest_pair(http, clock):
+    # Regression for #117: the dispatcher thread starts asynchronously, so a
+    # test that assumes the first pair is already in flight races it. Hold the
+    # dispatcher back deterministically: every refresh before it runs is
+    # overwritten, and the callback then sees only the newest pair.
+    late, entered, gate, seen = threading.Event(), threading.Event(), threading.Event(), []
+
+    def callback(access, refresh):
+        entered.set()
+        assert gate.wait(5)
+        seen.append((access, refresh))
+
+    chat = refreshing(http, clock, callback)
+    assert chat.is_available() is True
+    real = chat._run_refresh_callbacks
+
+    def delayed():
+        assert late.wait(5)
+        real()
+
+    chat._run_refresh_callbacks = delayed
+    for _ in range(3):
+        assert run_in_thread(lambda: chat._ensure_auth(force=True))
+    assert not entered.is_set() and chat._cb_pending == ('A3', 'R3')  # A1 and A2 were overwritten
+    late.set()
+    assert entered.wait(3)
+    gate.set()
+    assert wait_for(lambda: seen == [('A3', 'R3')])
     chat.stop()
     assert chat.stopped_cleanly is True
 
